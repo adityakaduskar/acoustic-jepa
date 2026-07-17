@@ -83,6 +83,37 @@ is: yes it is there (in raw/random), and no, JEPA does not hold it — it holds
 (Single probe seed; the pattern is consistent across all three targets, so it
 does not hinge on one number.)
 
+## Non-JEPA controls (is the negative specific to the predictive objective?)
+
+Trained a reconstruction **autoencoder (AE)** and a **supervised** head on the
+SAME two-stream architecture / inputs, probed identically (400 rooms):
+
+| target (metric) | JEPA  | AE    | raw   | random | probe |
+|-----------------|------:|------:|------:|-------:|-------|
+| room_vol (R²)   | 0.795 | 0.867 | 0.930 | 0.903  | nonlinear |
+| peer_pos (R²)   | 0.088 | 0.090 | 0.093 | **0.208** | nonlinear |
+| room_vol (R²)   | 0.794 | 0.849 | 0.879 | 0.877  | linear |
+| peer_pos (R²)   | 0.094 | 0.055 | 0.121 | 0.127  | linear |
+
+Supervised ceiling (encoder trained end-to-end on the target, test rooms):
+`room_vol` R² = 0.905 (ties raw/random — even the ceiling doesn't exceed raw);
+`peer_pos` R² = 0.001 (the flexible encoder overfits room identity and fails to
+generalise, whereas a *frozen* random projection decodes peer_pos at 0.208).
+
+**The negative is not JEPA-specific — it generalises to learned representation
+itself.** The `room_vol` ordering is monotonic in how hard the objective
+compresses input variance:
+
+    JEPA (predict) 0.795  <  AE (reconstruct) 0.867  <  random 0.903  <  raw 0.930
+
+i.e. prediction discards the most geometry, reconstruction less, and *not
+learning at all* (random projection / raw pooling) preserves the most. The AE
+confirms the mechanism (the predictive objective is the worst) but no learned
+SSL objective — predictive OR reconstructive — beats raw/random features, and
+even direct supervision doesn't exceed the raw baseline (or fails to generalise).
+On this simulator the decodable geometry is best accessed by *not* learning a
+representation.
+
 ## What this does and does not establish
 
 - It is consistent with v1's 2000-room plateau (~0.1 R² below raw); scaling 400→2000
