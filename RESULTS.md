@@ -58,15 +58,41 @@ baseline is hard to beat, and a predictive objective that compresses toward
 predictability tends to move *away* from linear geometric decodability, not toward
 it. Changing *whose* echo you predict (self → cross-view) did not change this.
 
+## Nonlinear probe (does JEPA hide geometry a linear probe can't read?)
+
+Same MLP probe (2 hidden layers, dropout, weight decay, early-stopped on a val
+split) applied **identically** to all three feature sets, on the same 400-room
+checkpoint:
+
+| target (metric) | chance | JEPA  | raw   | random |
+|-----------------|-------:|------:|------:|-------:|
+| peer_pos (R²)   |  0.000 | 0.088 | 0.093 | **0.204** |
+| room_vol (R²)   |  0.000 | 0.795 | **0.930** | 0.901 |
+| occluded (acc)  |  0.747 | 0.762 | 0.775 | 0.764 |
+
+**The nonlinear probe does not rescue JEPA — it hardens the negative.** The
+random encoder's `peer_pos` R² more than doubles under the MLP (0.10→0.20) while
+JEPA stays flat (0.09→0.09); `room_vol` improves nonlinearly for raw and random
+but not for JEPA (flat 0.79, now worst by a wide margin). So peer position and
+volume have genuine **nonlinear** structure in the acoustic features that a
+*random projection preserves and an MLP extracts* — and cross-view JEPA training
+has **compressed it away**. The answer to "is the geometry there but nonlinear?"
+is: yes it is there (in raw/random), and no, JEPA does not hold it — it holds
+*less* geometry than a random projection, linearly and nonlinearly.
+
+(Single probe seed; the pattern is consistent across all three targets, so it
+does not hinge on one number.)
+
 ## What this does and does not establish
 
 - It is consistent with v1's 2000-room plateau (~0.1 R² below raw); scaling 400→2000
   would likely strengthen, not reverse, the negative result.
-- The probe is **linear** by design (the whole comparison is about linear
-  decodability vs raw). JEPA could encode geometry nonlinearly; that is a different
-  question.
-- `peer_pos` is only weakly decodable by anyone (~0.1 R²) from the reflection-only
-  signal — a hard target, so its discriminating power is limited.
+- The negative is now shown under **both linear and nonlinear** probes, and the
+  mechanism is confirmed: the predictive objective discards geometric variance
+  (JEPA < random encoder), rather than re-encoding it in a form a linear probe
+  misses.
+- `peer_pos` is genuinely decodable (random 0.20 R² nonlinearly) from the
+  reflection-only signal — so the failure is JEPA's, not an unlearnable target.
 
 ## Reproduce
 
