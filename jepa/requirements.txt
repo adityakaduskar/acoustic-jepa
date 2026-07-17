@@ -1,0 +1,7 @@
+# Acoustic-JEPA training deps. Use a Python 3.11 or 3.12 venv:
+#   py -3.12 -m venv .venv   (install 3.12 first; 3.14 has no torch wheels)
+#   .venv\Scripts\activate
+#   pip install -r requirements.txt
+# CUDA build: install torch from https://pytorch.org per your CUDA version instead.
+numpy>=1.26
+torch>=2.2

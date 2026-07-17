@@ -1,0 +1,16 @@
+# Build outputs (rebuild via src/build.bat)
+tools/*.exe
+tools/*.dll
+src/*.obj
+src/*.pdb
+
+# Datasets and checkpoints (regenerable; sim is deterministic per SteamAudioIR
+# E2 -- see steam-audio-ir-tool memory notes)
+jepa_data/
+*.npz
+*.pt
+*.ckpt
+
+# Python venv / caches
+__pycache__/
+*.pyc
