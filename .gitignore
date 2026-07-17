@@ -17,5 +17,6 @@ swarm_data/
 *.ckpt
 
 # Python venv / caches
+.venv/
 __pycache__/
 *.pyc
