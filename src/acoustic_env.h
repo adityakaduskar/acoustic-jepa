@@ -111,14 +111,38 @@ static inline const IPLMaterial* material_table() {
 // ===========================================================================
 // wall index convention: 0:+x 1:-x 2:+y 3:-y 4:+z 5:-z
 struct Opening { int wall; IPLVector3 center; float w, h; };  // world-space center
+// Interior obstacle: an axis-aligned box (center + half-extents), its own
+// material. Obstacles are what stop the cross-view task from being solvable by
+// regressing the ~10 box-room parameters -- they add interior structure only a
+// truly allocentric representation can predict across viewpoints, and they let
+// agent pairs occlude one another. Default rooms have none (nObstacles=0), so
+// the monostatic jepa_dump dataset is byte-identical to before.
+struct Obstacle { IPLVector3 center, half; int material; };
 struct BoxRoom {
     float Lx, Ly, Lz;              // interior dims (m)
     IPLVector3 origin;             // min corner; room spans origin .. origin+(Lx,Ly,Lz)
     int  wall_material[6];
-    std::vector<Opening> openings; // recorded for labels; NOT carved into the mesh yet
+    std::vector<Opening>  openings;  // recorded for labels; carved into the mesh
+    std::vector<Obstacle> obstacles; // interior AABB reflectors (v2 cross-view)
 };
 
-inline BoxRoom make_box_room(uint32_t seed) {
+// segment (a->b) vs AABB (slab method); used for agent-agent occlusion tests
+inline bool segment_hits_aabb(IPLVector3 a, IPLVector3 b, IPLVector3 c, IPLVector3 h) {
+    float tmin = 0.f, tmax = 1.f;
+    float o[3] = { a.x, a.y, a.z }, d[3] = { b.x - a.x, b.y - a.y, b.z - a.z };
+    float lo[3] = { c.x - h.x, c.y - h.y, c.z - h.z }, hi[3] = { c.x + h.x, c.y + h.y, c.z + h.z };
+    for (int k = 0; k < 3; ++k) {
+        if (std::fabs(d[k]) < 1e-9f) { if (o[k] < lo[k] || o[k] > hi[k]) return false; continue; }
+        float inv = 1.f / d[k];
+        float t1 = (lo[k] - o[k]) * inv, t2 = (hi[k] - o[k]) * inv;
+        if (t1 > t2) std::swap(t1, t2);
+        tmin = std::max(tmin, t1); tmax = std::min(tmax, t2);
+        if (tmin > tmax) return false;
+    }
+    return true;
+}
+
+inline BoxRoom make_box_room(uint32_t seed, int nObstacles = 0) {
     Rng r(seed);
     BoxRoom rm{};
     rm.Lx = r.rf(3.f, 12.f);
@@ -156,7 +180,48 @@ inline BoxRoom make_box_room(uint32_t seed) {
         else                  o.center = V(cu, cy, z0); // -z
         rm.openings.push_back(o);
     }
+
+    // Interior obstacles (v2). Floor-standing AABB "pillars/furniture", kept
+    // clear of the walls and non-overlapping, a random material each. Sampled
+    // AFTER openings so obstacle presence never perturbs the wall/opening RNG
+    // stream -- make_box_room(seed, 0) is unchanged. Pillars stand ON the floor
+    // and rise ABOVE ear height (1.6 m) so they actually occlude agent-to-agent
+    // sightlines (the point of having them for the cross-view task); their tops
+    // vary so not every pair is blocked.
+    const float OB_CLEAR = 0.6f;   // min gap from any wall
+    for (int k = 0; k < nObstacles; ++k) {
+        Obstacle ob{};
+        bool placed = false;
+        for (int tries = 0; tries < 60 && !placed; ++tries) {
+            float hx = r.rf(0.2f, 0.6f), hz = r.rf(0.2f, 0.6f);
+            float top = std::min(rm.Ly - 0.1f, r.rf(1.7f, 2.4f));   // rises past ear height
+            float hy  = top * 0.5f;
+            float cyv = y0 + hy;                                    // bottom sits on the floor
+            float cx  = r.rf(x0 + OB_CLEAR + hx, x1 - OB_CLEAR - hx);
+            float cz  = r.rf(z0 + OB_CLEAR + hz, z1 - OB_CLEAR - hz);
+            if (x1 - OB_CLEAR - hx <= x0 + OB_CLEAR + hx) break;   // room too small
+            if (z1 - OB_CLEAR - hz <= z0 + OB_CLEAR + hz) break;
+            IPLVector3 c = V(cx, cyv, cz), h = V(hx, hy, hz);
+            bool overlaps = false;
+            for (const auto& p : rm.obstacles) {
+                if (std::fabs(c.x - p.center.x) < h.x + p.half.x + 0.3f &&
+                    std::fabs(c.y - p.center.y) < h.y + p.half.y + 0.3f &&
+                    std::fabs(c.z - p.center.z) < h.z + p.half.z + 0.3f) { overlaps = true; break; }
+            }
+            if (overlaps) continue;
+            ob.center = c; ob.half = h; ob.material = r.ri(0, NUM_MATERIALS - 1);
+            rm.obstacles.push_back(ob); placed = true;
+        }
+    }
     return rm;
+}
+
+// is the straight segment a->b blocked by any interior obstacle? (agent
+// occlusion test for cross-view pair sampling)
+inline bool room_occludes(const BoxRoom& rm, IPLVector3 a, IPLVector3 b) {
+    for (const auto& ob : rm.obstacles)
+        if (segment_hits_aabb(a, b, ob.center, ob.half)) return true;
+    return false;
 }
 
 // Build the room mesh: 6 walls, with any sampled opening cut out as a rectangular
@@ -218,6 +283,22 @@ inline void build_room_mesh(const BoxRoom& rm,
     // -z (z=z0)
     if (wop[5]) holeUV(wop[5], false, a0, a1, b0, b1);
     addWall([&](float u, float v) { return V(u, v, z0); }, x0, x1, y0, y1, wop[5] != nullptr, a0, a1, b0, b1, rm.wall_material[5]);
+
+    // interior obstacles: each an axis-aligned box (6 solid quads, closed so the
+    // agent gets echoes from every visible face; winding is not critical for
+    // reflections)
+    for (const auto& ob : rm.obstacles) {
+        float ax = ob.center.x - ob.half.x, bx = ob.center.x + ob.half.x;
+        float ay = ob.center.y - ob.half.y, by = ob.center.y + ob.half.y;
+        float az = ob.center.z - ob.half.z, bz = ob.center.z + ob.half.z;
+        int mt = ob.material;
+        addQuad(V(ax, ay, az), V(bx, ay, az), V(bx, by, az), V(ax, by, az), mt); // -z
+        addQuad(V(ax, ay, bz), V(bx, ay, bz), V(bx, by, bz), V(ax, by, bz), mt); // +z
+        addQuad(V(ax, ay, az), V(ax, ay, bz), V(ax, by, bz), V(ax, by, az), mt); // -x
+        addQuad(V(bx, ay, az), V(bx, ay, bz), V(bx, by, bz), V(bx, by, az), mt); // +x
+        addQuad(V(ax, ay, az), V(bx, ay, az), V(bx, ay, bz), V(ax, ay, bz), mt); // -y
+        addQuad(V(ax, by, az), V(bx, by, az), V(bx, by, bz), V(ax, by, bz), mt); // +y
+    }
 }
 
 // ===========================================================================

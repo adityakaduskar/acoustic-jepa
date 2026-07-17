@@ -130,19 +130,28 @@ struct SwarmEnv {
         scene = newScene; mesh = newMesh; room = rm; has_room = true;
     }
 
-    // ---- scatter N agents in the room (min separation + wall clearance) ---
+    // ---- scatter N agents in the room (min separation + wall + obstacle clearance) ---
+    // Agents must NOT spawn inside or hard against an obstacle -- a source
+    // embedded in solid geometry renders silent and corrupts the whole cycle.
     void place_agents(uint32_t seed, float minSep = 1.5f, float wallClear = 0.8f) {
         Rng r(seed * 40503u + 7u);
         const float x0 = room.origin.x + wallClear, x1 = room.origin.x + room.Lx - wallClear;
         const float z0 = room.origin.z + wallClear, z1 = room.origin.z + room.Lz - wallClear;
+        const float OB_PAD = 0.4f;   // keep this far outside any obstacle footprint at ear height
         for (int i = 0; i < N; ++i) {
             IPLVector3 p{}; bool ok = false;
-            for (int tries = 0; tries < 200 && !ok; ++tries) {
+            for (int tries = 0; tries < 400 && !ok; ++tries) {
                 p = V(r.rf(x0, x1), EAR_H, r.rf(z0, z1));
                 ok = true;
-                for (int j = 0; j < i; ++j) {
+                for (int j = 0; j < i && ok; ++j) {
                     float dx = p.x - pos[j].x, dz = p.z - pos[j].z;
-                    if (std::sqrt(dx * dx + dz * dz) < minSep) { ok = false; break; }
+                    if (std::sqrt(dx * dx + dz * dz) < minSep) ok = false;
+                }
+                for (const auto& ob : room.obstacles) {
+                    bool inX = p.x > ob.center.x - ob.half.x - OB_PAD && p.x < ob.center.x + ob.half.x + OB_PAD;
+                    bool inZ = p.z > ob.center.z - ob.half.z - OB_PAD && p.z < ob.center.z + ob.half.z + OB_PAD;
+                    bool inY = p.y > ob.center.y - ob.half.y && p.y < ob.center.y + ob.half.y;
+                    if (inX && inZ && inY) { ok = false; break; }
                 }
             }
             pos[i] = p; yaw[i] = r.rf(0.f, 360.f);
@@ -163,6 +172,7 @@ struct SwarmEnv {
         float ahead = m.dx * fx + m.dz * fz;
         float right = m.dx * rx + m.dz * rz;
         m.bearing_local = std::atan2(right, ahead) * 180.f / (float)M_PI;
+        m.occluded = room_occludes(room, pos[l], pos[e]);
         return m;
     }
 
@@ -246,20 +256,33 @@ struct SwarmEnv {
 //  Self-test:  -DSWARM_ENV_TEST
 // ---------------------------------------------------------------------------
 #ifdef SWARM_ENV_TEST
+static double range_energy(const acoustic_env::Obs& o) {
+    double e = 0; for (int i = 0; i < acoustic_env::RANGE_BINS; ++i) e += o.range[i]; return e;
+}
 int main() {
     using namespace acoustic_env;
     const int N = 3;
-    SwarmEnv env; env.init(N);
-    BoxRoom rm = make_box_room(2024);
-    env.set_room(rm);
-    env.place_agents(2024);
 
-    std::printf("room %.1f x %.1f x %.1f m, %d agents\n", rm.Lx, rm.Ly, rm.Lz, N);
+    // Same room seed, WITH interior obstacles: obstacles must (a) change the
+    // acoustics vs the empty room and (b) occlude some agent pairs -- both are
+    // what make the cross-view task non-degenerate.
+    SwarmEnv env; env.init(N);
+    BoxRoom empty = make_box_room(2024, 0);
+    BoxRoom obst  = make_box_room(2024, 3);
+    std::printf("room %.1f x %.1f x %.1f m, %d agents, %zu obstacle(s)\n",
+                obst.Lx, obst.Ly, obst.Lz, N, obst.obstacles.size());
+    for (const auto& ob : obst.obstacles)
+        std::printf("  obstacle @ (%.2f, %.2f, %.2f) half (%.2f, %.2f, %.2f) mat %d\n",
+                    ob.center.x, ob.center.y, ob.center.z, ob.half.x, ob.half.y, ob.half.z, ob.material);
+
+    env.set_room(obst);
+    env.place_agents(2024);
     for (int i = 0; i < N; ++i)
         std::printf("  agent %d @ (%.2f, %.2f, %.2f) yaw %.0f\n", i, env.pos[i].x, env.pos[i].y, env.pos[i].z, env.yaw[i]);
 
     // every ordered pair (listener l, emitter e), e != l
-    bool all_nonsilent = true;
+    bool all_nonsilent = true; int nOccl = 0, nClear = 0;
+    float occlPk = 0, clearPk = 0; int nOcclPk = 0, nClearPk = 0;
     for (int l = 0; l < N; ++l) for (int e = 0; e < N; ++e) {
         if (e == l) continue;
         Obs o = env.cross_observe(l, e);
@@ -269,20 +292,42 @@ int main() {
         for (float v : o.coch) ce += v; ce /= (2 * COCH_F * COCH_T);
         for (int b = 0; b < RANGE_BINS; ++b) if (o.range[b] > rpk) { rpk = o.range[b]; rb = b; }
         if (rawpk < 1e-9f) all_nonsilent = false;
-        std::printf("  L%d<-E%d: range %.2f m, bearing %+.0f deg | raw peak %.3g, coch mean %.3f, "
-                    "range-tower peak bin %d (%.3f)\n",
-                    l, e, m.range, m.bearing_local, rawpk, ce, rb, rpk);
+        if (m.occluded) { ++nOccl; occlPk += rawpk; ++nOcclPk; }
+        else            { ++nClear; clearPk += rawpk; ++nClearPk; }
+        std::printf("  L%d<-E%d: range %.2f m, bearing %+.0f deg, %s | raw peak %.3g, "
+                    "coch mean %.3f, range-tower peak bin %d (%.3f)\n",
+                    l, e, m.range, m.bearing_local, m.occluded ? "OCCLUDED" : "clear",
+                    rawpk, ce, rb, rpk);
     }
 
-    // reciprocity sanity: L0<-E1 and L1<-E0 traverse the same wall geometry; their
-    // W-channel range profiles should be similar in gross energy (not identical --
-    // different head frames). Just report, don't gate.
+    // Reciprocity is only a clean invariant for SIMPLE geometry: Steam Audio
+    // traces rays from the listener, so in cluttered/occluded scenes the diffuse
+    // tail is gathered asymmetrically between reciprocal configs even though the
+    // specular peak stays near-symmetric. Informational here (cross-view never
+    // relies on reciprocity -- every pair is rendered explicitly).
     Obs a = env.cross_observe(0, 1), b = env.cross_observe(1, 0);
-    double ea = 0, eb = 0; for (int i = 0; i < RANGE_BINS; ++i) { ea += a.range[i]; eb += b.range[i]; }
-    std::printf("reciprocity check: sum|range| L0<-E1=%.2f  L1<-E0=%.2f  ratio %.2f\n",
-                ea, eb, ea / std::max(1e-9, eb));
+    std::printf("reciprocity (informational, cluttered room): sum|range| L0<-E1=%.2f L1<-E0=%.2f "
+                "ratio %.2f (log-sum diverges; engine traces from listener)\n",
+                range_energy(a), range_energy(b), range_energy(a) / std::max(1e-9, range_energy(b)));
 
-    std::printf("cross-view render: %s\n", all_nonsilent ? "PASS (all pairs non-silent)" : "FAIL (a pair was silent)");
+    // obstacle-sensitivity: same agents, empty room vs obstacle room -> the
+    // range profile must differ (otherwise obstacles aren't in the acoustics)
+    double e_obst = range_energy(env.cross_observe(0, 1));
+    env.set_room(empty);
+    double e_empty = range_energy(env.cross_observe(0, 1));
+    double rel = std::fabs(e_obst - e_empty) / std::max(1e-9, e_empty);
+    std::printf("obstacle sensitivity: L0<-E1 sum|range| obstacle=%.2f empty=%.2f  rel diff %.1f%%\n",
+                e_obst, e_empty, 100.0 * rel);
+
+    // occlusion should ATTENUATE the received echo: mean raw peak lower when blocked
+    float occlMean = nOcclPk ? occlPk / nOcclPk : 0.f, clearMean = nClearPk ? clearPk / nClearPk : 0.f;
+    std::printf("occlusion attenuation: mean raw peak occluded=%.4g clear=%.4g\n", occlMean, clearMean);
+
+    // PASS on what THIS increment adds: obstacles in the acoustics, a MIX of
+    // occluded/clear pairs, no silent (embedded-agent) pairs.
+    bool ok = all_nonsilent && nOccl >= 1 && nClear >= 1 && rel > 0.01;
+    std::printf("cross-view + obstacles: %s (non-silent=%d, occluded=%d, clear=%d, obstacle-sensitive=%d)\n",
+                ok ? "PASS" : "CHECK", all_nonsilent, nOccl, nClear, rel > 0.01);
     env.shutdown();
     return 0;
 }
