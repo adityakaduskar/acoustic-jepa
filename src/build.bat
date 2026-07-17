@@ -26,6 +26,19 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM swarm_env.h self-test (N-agent cross-view render)
+cl /nologo /EHsc /O2 /std:c++17 /DSWARM_ENV_TEST ^
+   /I "%SA_INC%" ^
+   /Tp swarm_env.h ^
+   /Fe:..\tools\swarm_env_test.exe ^
+   /Fo:swarm_env_test.obj ^
+   /link "%SA_LIB%\phonon.lib"
+if errorlevel 1 (
+    echo.
+    echo BUILD FAILED ^(swarm_env_test^)
+    exit /b 1
+)
+
 for %%T in (jepa_dump) do (
     cl /nologo /EHsc /O2 /std:c++17 ^
        /I "%SA_INC%" ^
