@@ -224,6 +224,45 @@ inline bool room_occludes(const BoxRoom& rm, IPLVector3 a, IPLVector3 b) {
     return false;
 }
 
+// ---- analytic GT geometry labels for a pose in a box room -----------------
+// Shared by AcousticEnv (monostatic) and SwarmEnv (cross-view) so both label
+// identically. Wall distances are for the empty box; interior obstacles are NOT
+// reflected in dist_wall (they show up acoustically, and obstacle-aware targets
+// are computed separately where needed).
+inline Label analytic_label(const BoxRoom& room, IPLVector3 pose, float yawDeg) {
+    Label lb{}; lb.pose[0] = pose.x; lb.pose[1] = pose.y; lb.pose[2] = pose.z; lb.yaw = yawDeg;
+    const float x0 = room.origin.x, x1 = x0 + room.Lx;
+    const float z0 = room.origin.z, z1 = z0 + room.Lz;
+
+    for (int k = 0; k < 8; ++k) {
+        float a = (yawDeg + 45.f * k) * (float)M_PI / 180.f;
+        float dx = std::sin(a), dz = -std::cos(a);          // ahead convention
+        float tx = dx > 1e-6f ? (x1 - pose.x) / dx : (dx < -1e-6f ? (x0 - pose.x) / dx : 1e30f);
+        float tz = dz > 1e-6f ? (z1 - pose.z) / dz : (dz < -1e-6f ? (z0 - pose.z) / dz : 1e30f);
+        lb.dist_wall[k] = std::min(tx, tz);
+    }
+
+    lb.room_vol = room.Lx * room.Ly * room.Lz;
+
+    float dpx = x1 - pose.x, dnx = pose.x - x0, dpz = z1 - pose.z, dnz = pose.z - z0;
+    float best = dpx; int wall = 0;
+    if (dnx < best) { best = dnx; wall = 1; }
+    if (dpz < best) { best = dpz; wall = 4; }
+    if (dnz < best) { best = dnz; wall = 5; }
+    lb.material_id = room.wall_material[wall];
+
+    lb.open_azim = NAN;
+    float bestArea = 0;
+    for (const auto& op : room.openings) {
+        float area = op.w * op.h;
+        if (area > bestArea) {
+            bestArea = area;
+            lb.open_azim = std::atan2(op.center.x - pose.x, -(op.center.z - pose.z)) * 180.f / (float)M_PI;
+        }
+    }
+    return lb;
+}
+
 // Build the room mesh: 6 walls, with any sampled opening cut out as a rectangular
 // hole. A holed wall becomes a frame of up to 4 quads (bottom/top/left/right)
 // around the hole; a solid wall is a single quad. Floor/ceiling never hole.
@@ -589,44 +628,8 @@ struct AcousticEnv {
         return o;
     }
 
-    // ---- analytic GT labels for the current box room (openings ignored, STUB) ----
-    Label label(IPLVector3 pose, float yawDeg) const {
-        Label lb{}; lb.pose[0] = pose.x; lb.pose[1] = pose.y; lb.pose[2] = pose.z; lb.yaw = yawDeg;
-        const float x0 = room.origin.x, x1 = x0 + room.Lx;
-        const float z0 = room.origin.z, z1 = z0 + room.Lz;
-
-        // distance to a side wall along 8 horizontal directions relative to heading
-        for (int k = 0; k < 8; ++k) {
-            float a = (yawDeg + 45.f * k) * (float)M_PI / 180.f;
-            float dx = std::sin(a), dz = -std::cos(a);          // ahead convention
-            float tx = dx > 1e-6f ? (x1 - pose.x) / dx : (dx < -1e-6f ? (x0 - pose.x) / dx : 1e30f);
-            float tz = dz > 1e-6f ? (z1 - pose.z) / dz : (dz < -1e-6f ? (z0 - pose.z) / dz : 1e30f);
-            lb.dist_wall[k] = std::min(tx, tz);
-        }
-
-        lb.room_vol = room.Lx * room.Ly * room.Lz;
-
-        // nearest wall (perpendicular) -> its material id
-        float dpx = x1 - pose.x, dnx = pose.x - x0, dpz = z1 - pose.z, dnz = pose.z - z0;
-        float best = dpx; int wall = 0;
-        if (dnx < best) { best = dnx; wall = 1; }
-        if (dpz < best) { best = dpz; wall = 4; }
-        if (dnz < best) { best = dnz; wall = 5; }
-        lb.material_id = room.wall_material[wall];
-
-        // largest opening -> allocentric azimuth of its center (label reflects the
-        // intended hole even though build_room_mesh hasn't carved it yet)
-        lb.open_azim = NAN;
-        float bestArea = 0;
-        for (const auto& op : room.openings) {
-            float area = op.w * op.h;
-            if (area > bestArea) {
-                bestArea = area;
-                lb.open_azim = std::atan2(op.center.x - pose.x, -(op.center.z - pose.z)) * 180.f / (float)M_PI;
-            }
-        }
-        return lb;
-    }
+    // ---- analytic GT labels for the current box room ----
+    Label label(IPLVector3 pose, float yawDeg) const { return analytic_label(room, pose, yawDeg); }
 
     // convenience: advance pose by an action (step then turn); clamps off walls
     void apply_action(IPLVector3& pose, float& yawDeg, const Action& a) const {

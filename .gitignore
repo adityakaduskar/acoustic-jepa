@@ -4,9 +4,14 @@ tools/*.dll
 src/*.obj
 src/*.pdb
 
-# Datasets and checkpoints (regenerable; sim is deterministic per SteamAudioIR
-# E2 -- see steam-audio-ir-tool memory notes)
+# Datasets and checkpoints. Regenerable from seed: room geometry, agent
+# placement, transforms and analytic labels are byte-identical across runs;
+# the Steam Audio reflection RENDER carries ~1% run-to-run stochastic jitter in
+# cluttered scenes (NOT bit-deterministic -- E2's determinism was a simple
+# single-wall scene), which is harmless / mild augmentation, not reproducible
+# byte-for-byte. So: statistically regenerable, not tracked.
 jepa_data/
+swarm_data/
 *.npz
 *.pt
 *.ckpt
