@@ -45,6 +45,33 @@ struct CrossMeta {
     bool  occluded = false;         // true if the E->L segment is blocked (phase 1a: always false)
 };
 
+// what the LISTENER could actually MEASURE about the emitter with its own ears
+// (no oracle): range from the direct arrival (sample-exact per multi_swarm
+// Stage 3), bearing from binaural ITD inverted through the listener's OWN
+// ITD-vs-azimuth self-calibration, front/back by a +20 deg head-turn re-measure.
+// The residual error vs CrossMeta is the honest measurement error the predictor
+// should be conditioned on instead of the oracle transform. Emitter YAW is not
+// included: the emitter is an omni source, so its heading does not affect what
+// the listener receives and is not observable.
+struct MeasuredT {
+    float dx = 0, dy = 0, dz = 0;   // measured (emitter - listener), world coords (m)
+    float range = 0;                // measured range (m)
+    float bearing_local = 0;        // measured azimuth in listener's head frame (deg)
+    int   fb_ok = 1;                // 1 if the front/back head-turn test resolved consistently
+};
+
+// world direction -> listener-local coords at head yaw th (ahead=-z, right=+x),
+// matching SteamAudioIR/src/multi_swarm.cpp::toLocal and the binaural-effect
+// direction convention.
+inline IPLVector3 toLocal(IPLVector3 d, float thDeg) {
+    float t = thDeg * (float)M_PI / 180.f;
+    IPLVector3 ah{ std::sin(t), 0, -std::cos(t) }, ri{ std::cos(t), 0, std::sin(t) };
+    float lx = d.x * ri.x + d.y * ri.y + d.z * ri.z;
+    float ly = d.y;
+    float lz = -(d.x * ah.x + d.y * ah.y + d.z * ah.z);
+    return V(lx, ly, lz);
+}
+
 struct SwarmEnv {
     IPLContext ctx = nullptr;
     IPLSimulator sim = nullptr;
@@ -58,8 +85,14 @@ struct SwarmEnv {
     std::vector<IPLSource> srcs;                 // one per agent (emitter role)
     std::vector<IPLHRTF>   hrtfs;                // one per agent (listener role)
     std::vector<IPLAmbisonicsDecodeEffect> decs; // one per agent HRTF
+    std::vector<IPLBinauralEffect> bins;         // one per agent HRTF (direct-path HRIR synth)
     std::vector<IPLVector3> pos;                 // agent positions (world, ear height)
     std::vector<float>      yaw;                 // agent head yaw (deg)
+
+    // per-agent ITD-vs-azimuth self-calibration (built once from own HRTF),
+    // -90..+90 deg in 15 deg steps, then sorted ascending by ITD for interp
+    static const int CAL_N = 13;                 // -90..90 step 15
+    std::vector<std::vector<float>> cal_az, cal_itd;   // [agent][CAL_N], sorted by itd
 
     Cochleagram   coch;
     MatchedFilter mf;
@@ -99,16 +132,135 @@ struct SwarmEnv {
 
         IPLReflectionEffectSettings rs{}; rs.type = IPL_REFLECTIONEFFECTTYPE_CONVOLUTION; rs.irSize = IRN; rs.numChannels = AMBI;
         chk(iplReflectionEffectCreate(ctx, &au, &rs, &refl), "refl");
+        bins.resize(N, nullptr);
         for (int i = 0; i < N; ++i) {
             IPLAmbisonicsDecodeEffectSettings ds{}; ds.speakerLayout.type = IPL_SPEAKERLAYOUTTYPE_STEREO;
             ds.hrtf = hrtfs[i]; ds.maxOrder = ORDER;
             chk(iplAmbisonicsDecodeEffectCreate(ctx, &au, &ds, &decs[i]), "dec");
+            IPLBinauralEffectSettings bs{}; bs.hrtf = hrtfs[i];
+            chk(iplBinauralEffectCreate(ctx, &au, &bs, &bins[i]), "bin");
         }
         mf.init();
         pos.assign(N, V(0, EAR_H, 0)); yaw.assign(N, 0.f);
+        build_calibration();
     }
 
     static constexpr float EAR_H = 1.6f;
+
+    // ---- direct-path binaural HRIR of a LOCAL direction (listener i's ears) ----
+    // The engine renders no direct path, so a peer's direct arrival is synthesised
+    // from the listener's HRTF (multi_swarm.cpp::directHRIR). localDir uses +x
+    // right, -z ahead (== toLocal output).
+    std::vector<std::vector<float>> direct_hrir(int i, IPLVector3 localDir, int n) {
+        std::vector<std::vector<float>> out(2, std::vector<float>(n, 0.f));
+        std::vector<float> inF(FRAME, 0.f); inF[0] = 1.f; float* inP = inF.data(); IPLAudioBuffer inB{ 1, FRAME, &inP };
+        std::vector<float> l(FRAME), r(FRAME); float* bP[2] = { l.data(), r.data() }; IPLAudioBuffer bB{ 2, FRAME, bP };
+        IPLBinauralEffectParams bp{}; bp.direction = localDir; bp.interpolation = IPL_HRTFINTERPOLATION_BILINEAR;
+        bp.spatialBlend = 1.0f; bp.hrtf = hrtfs[i];
+        iplBinauralEffectReset(bins[i]);
+        for (int p = 0; p < n; p += FRAME) {
+            iplBinauralEffectApply(bins[i], &bp, &inB, &bB);
+            int cp = std::min(FRAME, n - p);
+            std::memcpy(&out[0][p], l.data(), cp * sizeof(float));
+            std::memcpy(&out[1][p], r.data(), cp * sizeof(float));
+            inF[0] = 0.f;
+        }
+        return out;
+    }
+
+    // ---- ITD (samples) by cross-correlation + parabolic interp -------------
+    // POSITIVE = right ear later = source on the LEFT (multi_swarm.py itd_us).
+    static float itd_samples(const std::vector<float>& l, const std::vector<float>& r, int maxlag = 48) {
+        int n = (int)std::min(l.size(), r.size());
+        float best = -1e30f; int bl = 0; std::vector<float> cc(2 * maxlag + 1);
+        for (int gi = 0; gi <= 2 * maxlag; ++gi) {
+            int g = gi - maxlag; double s = 0;
+            int i0 = std::max(0, -g), i1 = n - std::max(0, g);
+            for (int i = i0; i < i1; ++i) s += (double)l[i] * r[i + g];
+            cc[gi] = (float)s; if (s > best) { best = (float)s; bl = gi; }
+        }
+        float sub = 0.f;
+        if (bl > 0 && bl < 2 * maxlag) {
+            float y0 = cc[bl - 1], y1 = cc[bl], y2 = cc[bl + 1], den = y0 - 2 * y1 + y2;
+            if (den != 0.f) sub = 0.5f * (y0 - y2) / den;
+        }
+        return (float)(bl - maxlag) + sub;
+    }
+
+    // ---- build each agent's ITD-vs-azimuth curve from its own HRTF ----------
+    void build_calibration() {
+        cal_az.assign(N, std::vector<float>(CAL_N));
+        cal_itd.assign(N, std::vector<float>(CAL_N));
+        for (int i = 0; i < N; ++i) {
+            std::vector<std::pair<float, float>> pts;   // (itd, az)
+            for (int k = 0; k < CAL_N; ++k) {
+                float az = -90.f + 15.f * k, a = az * (float)M_PI / 180.f;
+                auto h = direct_hrir(i, V(std::sin(a), 0, -std::cos(a)), 4096);
+                pts.push_back({ itd_samples(h[0], h[1]), az });
+            }
+            std::sort(pts.begin(), pts.end());          // ascending ITD for interp
+            for (int k = 0; k < CAL_N; ++k) { cal_itd[i][k] = pts[k].first; cal_az[i][k] = pts[k].second; }
+        }
+    }
+
+    float itd_to_az(int i, float itd) const {
+        const auto& x = cal_itd[i]; const auto& y = cal_az[i];
+        if (itd <= x.front()) return y.front();
+        if (itd >= x.back())  return y.back();
+        for (int k = 1; k < CAL_N; ++k)
+            if (itd <= x[k]) {
+                float t = (itd - x[k - 1]) / std::max(1e-9f, x[k] - x[k - 1]);
+                return y[k - 1] + t * (y[k] - y[k - 1]);
+            }
+        return y.back();
+    }
+
+    // ---- measure the transform to emitter E from listener L's ears only -----
+    MeasuredT measure_tab(int l, int e) {
+        MeasuredT t;
+        IPLVector3 d = V(pos[e].x - pos[l].x, pos[e].y - pos[l].y, pos[e].z - pos[l].z);
+        float R = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        t.range = R;   // direct-arrival range is sample-exact (multi_swarm Stage 3)
+        IPLVector3 du = V(d.x / R, d.y / R, d.z / R);
+
+        auto measure_lat = [&](float headYaw) {
+            auto h = direct_hrir(l, toLocal(du, headYaw), 4096);
+            return itd_to_az(l, itd_samples(h[0], h[1]));
+        };
+        float lat0  = measure_lat(yaw[l]);
+        float lat20 = measure_lat(yaw[l] + 20.f);
+
+        // front/back: ITD alone can't tell front from rear (cone of confusion).
+        // Pick the hypothesis whose predicted lateral angle after the +20 deg
+        // head-turn matches the re-measurement (multi_swarm.py front/back test).
+        auto wrap180 = [](float a) { return std::fmod(a + 540.f, 360.f) - 180.f; };
+        auto pred_lat = [&](float azRel) {
+            return (float)(std::asin(std::sin((azRel - 20.f) * (float)M_PI / 180.f)) * 180.0 / M_PI);
+        };
+        float hyp_front = lat0;
+        float hyp_rear  = lat0 >= 0.f ? 180.f - lat0 : -180.f - lat0;
+        float err_f = std::fabs(wrap180(pred_lat(hyp_front) - lat20));
+        float err_r = std::fabs(wrap180(pred_lat(hyp_rear)  - lat20));
+        float az = err_f <= err_r ? hyp_front : hyp_rear;
+
+        // is the chosen hypothesis actually the true side? (score only)
+        float ahead = du.x * std::sin(yaw[l] * (float)M_PI / 180.f) + du.z * (-std::cos(yaw[l] * (float)M_PI / 180.f));
+        bool trueFront = ahead >= 0.f;
+        bool choseFront = (err_f <= err_r);
+        t.fb_ok = (choseFront == trueFront) ? 1 : 0;
+
+        t.bearing_local = az;
+        float ar = az * (float)M_PI / 180.f;
+        // measured emitter position: own pose + measured range along measured bearing
+        // (2D in x/z at ear height; elevation is not recovered from ITD)
+        IPLVector3 fwd = V(std::sin(yaw[l] * (float)M_PI / 180.f), 0, -std::cos(yaw[l] * (float)M_PI / 180.f));
+        IPLVector3 rgt = V(std::cos(yaw[l] * (float)M_PI / 180.f), 0,  std::sin(yaw[l] * (float)M_PI / 180.f));
+        float fwdc = R * std::cos(ar), rgtc = R * std::sin(ar);
+        t.dx = fwd.x * fwdc + rgt.x * rgtc;
+        t.dz = fwd.z * fwdc + rgt.z * rgtc;
+        t.dy = 0.f;
+        return t;
+    }
 
     // ---- swap in a procedural room (same mesh path as AcousticEnv) --------
     void set_room(const BoxRoom& rm) {
@@ -240,6 +392,7 @@ struct SwarmEnv {
 
     void shutdown() {
         for (auto& d : decs) if (d) iplAmbisonicsDecodeEffectRelease(&d);
+        for (auto& b : bins) if (b) iplBinauralEffectRelease(&b);
         if (refl) iplReflectionEffectRelease(&refl);
         if (mesh) iplStaticMeshRelease(&mesh);
         if (scene) iplSceneRelease(&scene);
@@ -322,6 +475,23 @@ int main() {
     // occlusion should ATTENUATE the received echo: mean raw peak lower when blocked
     float occlMean = nOcclPk ? occlPk / nOcclPk : 0.f, clearMean = nClearPk ? clearPk / nClearPk : 0.f;
     std::printf("occlusion attenuation: mean raw peak occluded=%.4g clear=%.4g\n", occlMean, clearMean);
+
+    // measured T_AB (ITD-calibrated bearing + head-turn front/back) vs oracle
+    std::printf("\nmeasured T_AB vs oracle (bearing from own-ear ITD calibration):\n");
+    float maxBearErr = 0, maxPosErr = 0; int fbAll = 1;
+    for (int l = 0; l < N; ++l) for (int e = 0; e < N; ++e) {
+        if (e == l) continue;
+        CrossMeta gt = env.cross_meta(l, e);
+        MeasuredT mt = env.measure_tab(l, e);
+        float bErr = std::fabs(std::fmod(mt.bearing_local - gt.bearing_local + 540.f, 360.f) - 180.f);
+        float posErr = std::sqrt((mt.dx - gt.dx) * (mt.dx - gt.dx) + (mt.dz - gt.dz) * (mt.dz - gt.dz));
+        maxBearErr = std::max(maxBearErr, bErr); maxPosErr = std::max(maxPosErr, posErr);
+        if (!mt.fb_ok) fbAll = 0;
+        std::printf("  L%d<-E%d: bearing meas %+.0f true %+.0f (err %.1f) | pos err %.2f m | fb_ok %d\n",
+                    l, e, mt.bearing_local, gt.bearing_local, bErr, posErr, mt.fb_ok);
+    }
+    std::printf("measured T_AB: max bearing err %.1f deg, max pos err %.2f m, front/back all-correct %d\n",
+                maxBearErr, maxPosErr, fbAll);
 
     // PASS on what THIS increment adds: obstacles in the acoustics, a MIX of
     // occluded/clear pairs, no silent (embedded-agent) pairs.

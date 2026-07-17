@@ -24,6 +24,10 @@
 //    cross_range f16 [P, 256]        listener L's range profile of E's ping (HRTF-free)
 //    pair        i32 [P, 2]          (listener L, emitter E) for each cross row, P=N*(N-1)
 //    T_true      f32 [P, 6]          (dx, dy, dz, range_m, rel_yaw_deg, bearing_local_deg)
+//    T_meas      f32 [P, 6]          MEASURED (dx, dy, dz, range_m, bearing_deg, fb_ok);
+//                                    what listener L infers from its own ears (ITD
+//                                    calibration + head-turn front/back). Train on
+//                                    this (self-supervised); T_true is for scoring.
 //    occluded    i32 [P]             1 if the E->L straight sightline is blocked
 //    agent_pose  f32 [N, 4]          (x, y, z, yaw_deg)
 //    dist_wall   f32 [N, 8]          per-agent GT wall distance per yaw sector
@@ -56,7 +60,7 @@ static void run_episode(SwarmEnv& env, uint32_t seed, int N, int nOb, const std:
     env.place_agents(seed);
 
     const int P = N * (N - 1);
-    std::vector<float> mono_coch, mono_range, cross_coch, cross_range, Tt, apose, dwall, vol, oaz;
+    std::vector<float> mono_coch, mono_range, cross_coch, cross_range, Tt, Tm, apose, dwall, vol, oaz;
     std::vector<int32_t> pair, occl, mat;
     mono_coch.reserve((size_t)N * 2 * COCH_F * COCH_T);
     cross_coch.reserve((size_t)P * 2 * COCH_F * COCH_T);
@@ -80,9 +84,12 @@ static void run_episode(SwarmEnv& env, uint32_t seed, int N, int nOb, const std:
         CrossMeta m = env.cross_meta(l, e);
         cross_coch.insert(cross_coch.end(), o.coch, o.coch + 2 * COCH_F * COCH_T);
         cross_range.insert(cross_range.end(), o.range, o.range + RANGE_BINS);
+        MeasuredT mt = env.measure_tab(l, e);
         pair.push_back(l); pair.push_back(e);
         Tt.push_back(m.dx); Tt.push_back(m.dy); Tt.push_back(m.dz);
         Tt.push_back(m.range); Tt.push_back(m.rel_yaw); Tt.push_back(m.bearing_local);
+        Tm.push_back(mt.dx); Tm.push_back(mt.dy); Tm.push_back(mt.dz);
+        Tm.push_back(mt.range); Tm.push_back(mt.bearing_local); Tm.push_back((float)mt.fb_ok);
         occl.push_back(m.occluded ? 1 : 0);
     }
 
@@ -104,6 +111,7 @@ static void run_episode(SwarmEnv& env, uint32_t seed, int N, int nOb, const std:
         npy_f16("cross_range.npy", { P, RANGE_BINS },        cross_range),
         npy_i32("pair.npy",        { P, 2 },                 pair),
         npy_f32("T_true.npy",      { P, 6 },                 Tt),
+        npy_f32("T_meas.npy",      { P, 6 },                 Tm),
         npy_i32("occluded.npy",    { P },                    occl),
         npy_f32("agent_pose.npy",  { N, 4 },                 apose),
         npy_f32("dist_wall.npy",   { N, 8 },                 dwall),
