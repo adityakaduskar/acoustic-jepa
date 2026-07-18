@@ -168,7 +168,10 @@ def train_wm(eps, dev, H=6, epochs=25, bs=128, freeze_encoder=False, seed=0):
 
 # ------------------------------------------------------------- controllers
 @torch.no_grad()
-def cem_plan(wm, z0, H, dev, iters=3, N=256, elite=32):
+def cem_plan(wm, z0, H, dev, goal="wall", iters=3, N=256, elite=32):
+    # wall  -> MINIMISE imagined nearest-wall distance (approach a wall)
+    # center-> MAXIMISE it (stay away from all walls); flip the cost sign.
+    sign = 1.0 if goal == "wall" else -1.0
     mu = torch.zeros(H, 2, device=dev); sd = torch.tensor([[30.0, 0.6]], device=dev).repeat(H, 1)
     for _ in range(iters):
         eps = torch.randn(N, H, 2, device=dev) * sd + mu
@@ -177,26 +180,29 @@ def cem_plan(wm, z0, H, dev, iters=3, N=256, elite=32):
         an = torch.stack([dyaw / DYAW_MAX, dstep / DSTEP_MAX * 2 - 1], -1)
         z = z0.expand(N, -1)
         preds = wm.rollout(z, an)                                # [N,H,emb]
-        cost = wm.readout(preds.reshape(N * H, -1)).reshape(N, H).sum(1)   # minimise nwd
+        cost = sign * wm.readout(preds.reshape(N * H, -1)).reshape(N, H).sum(1)
         top = cost.argsort()[:elite]
         chosen = torch.stack([dyaw, dstep], -1)[top]
         mu = chosen.mean(0); sd = chosen.std(0) + 1e-3
     return mu.cpu().numpy()                                       # [H,2] raw actions
 
 
-def analytic_action(x, z, yaw, room):
-    """Greedy oracle: face the true nearest wall, step full."""
-    Lx, Lz = room[0], room[2]
-    ds = {"+x": Lx / 2 - x, "-x": x + Lx / 2, "+z": Lz / 2 - z, "-z": z + Lz / 2}
-    tgt = min(ds, key=ds.get)
-    want = {"+x": 90.0, "-x": -90.0, "+z": 180.0, "-z": 0.0}[tgt]
+def analytic_action(x, z, yaw, room, goal="wall"):
+    """Greedy oracle. wall: face the true nearest wall. center: face room centre (0,0)."""
+    if goal == "wall":
+        Lx, Lz = room[0], room[2]
+        ds = {"+x": Lx / 2 - x, "-x": x + Lx / 2, "+z": Lz / 2 - z, "-z": z + Lz / 2}
+        tgt = min(ds, key=ds.get)
+        want = {"+x": 90.0, "-x": -90.0, "+z": 180.0, "-z": 0.0}[tgt]
+    else:                                                        # head toward centre (0,0)
+        want = math.degrees(math.atan2(0.0 - x, -(0.0 - z)))
     d = ((want - yaw + 180) % 360) - 180
     return max(-DYAW_MAX, min(DYAW_MAX, d)), DSTEP_MAX
 
 
-def eval_controller(kind, wm, eps, dev, H=6, n_starts=150, seed=1):
+def eval_controller(kind, wm, eps, dev, H=6, n_starts=150, seed=1, goal="wall"):
     g = np.random.default_rng(seed)
-    reductions = []
+    scores = []
     for _ in range(n_starts):
         e = eps[g.integers(len(eps))]
         K = e["act"].shape[0]; s = int(g.integers(0, K - H))
@@ -206,19 +212,21 @@ def eval_controller(kind, wm, eps, dev, H=6, n_starts=150, seed=1):
             coch = torch.tensor(e["coch"][s:s + 1], device=dev)
             rng = torch.tensor(e["range"][s:s + 1], device=dev)
             z0 = wm.enc(coch, rng)
-            acts = cem_plan(wm, z0, H, dev)
+            acts = cem_plan(wm, z0, H, dev, goal=goal)
             for k in range(H):
                 x, z, yaw = step_pose(x, z, yaw, float(acts[k, 0]), float(acts[k, 1]), room)
         elif kind == "analytic":
             for _ in range(H):
-                dy, dstp = analytic_action(x, z, yaw, room)
+                dy, dstp = analytic_action(x, z, yaw, room, goal=goal)
                 x, z, yaw = step_pose(x, z, yaw, dy, dstp, room)
         else:  # rand-act
             for _ in range(H):
                 x, z, yaw = step_pose(x, z, yaw, float(g.uniform(-DYAW_MAX, DYAW_MAX)),
                                       float(g.uniform(0, DSTEP_MAX)), room)
-        reductions.append(start_nwd - nwd_from_pose(x, z, room))
-    return float(np.mean(reductions)), float(np.std(reductions) / math.sqrt(len(reductions)))
+        final_nwd = nwd_from_pose(x, z, room)
+        # score = progress toward the goal (higher always better)
+        scores.append((start_nwd - final_nwd) if goal == "wall" else (final_nwd - start_nwd))
+    return float(np.mean(scores)), float(np.std(scores) / math.sqrt(len(scores)))
 
 
 def main():
@@ -228,13 +236,15 @@ def main():
     ap.add_argument("--H", type=int, default=6)
     ap.add_argument("--starts", type=int, default=200)
     ap.add_argument("--repeats", type=int, default=1, help="training seeds for error bars")
+    ap.add_argument("--goal", choices=["wall", "center"], default="wall")
     args = ap.parse_args()
     dev = args.device
+    G = args.goal
 
     eps = load_traj(args.data_dir)
     ntr = int(0.8 * len(eps)); tr, te = eps[:ntr], eps[ntr:]
     print(f"trajectory data: {len(eps)} episodes ({ntr} train / {len(te)} test), H={args.H}, "
-          f"repeats={args.repeats}")
+          f"repeats={args.repeats}, goal={G}")
 
     EVAL_SEED = 100          # FIXED eval starts across repeats -> variance is from TRAINING seed only
     learned_r, random_r = [], []
@@ -242,20 +252,22 @@ def main():
         print(f"[seed {r}] training learned + random-encoder world models...")
         wm = train_wm(tr, dev, H=args.H, freeze_encoder=False, seed=r)
         wm_rand = train_wm(tr, dev, H=args.H, freeze_encoder=True, seed=r)
-        lr, _ = eval_controller("learned", wm, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED)
-        rr, _ = eval_controller("random", wm_rand, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED)
+        lr, _ = eval_controller("learned", wm, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED, goal=G)
+        rr, _ = eval_controller("random", wm_rand, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED, goal=G)
         learned_r.append(lr); random_r.append(rr)
         print(f"[seed {r}] learned {lr:+.3f}  random-enc {rr:+.3f}")
 
     # seed-independent bounds (need a model arg but ignore it)
     dummy = wm
-    an, _ = eval_controller("analytic", dummy, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED)
-    ra, _ = eval_controller("rand-act", dummy, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED)
+    an, _ = eval_controller("analytic", dummy, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED, goal=G)
+    ra, _ = eval_controller("rand-act", dummy, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED, goal=G)
 
     def ms(v):
         v = np.array(v); return v.mean(), (v.std(ddof=1) if len(v) > 1 else 0.0)
     lm, ls = ms(learned_r); rm, rs = ms(random_r)
-    print(f"\nnearest-wall-distance REDUCTION over {args.H} steps (mean +/- SD over "
+    metric = "nearest-wall-distance REDUCTION (approach wall)" if G == "wall" else \
+             "wall-distance INCREASE (reach centre)"
+    print(f"\n{metric} over {args.H} steps (mean +/- SD over "
           f"{args.repeats} training seeds; held-out rooms, {args.starts} fixed starts):")
     print(f"  analytic (oracle)    {an:+.3f}            (seed-independent upper bound)")
     print(f"  learned MPC          {lm:+.3f} +/- {ls:.3f}")

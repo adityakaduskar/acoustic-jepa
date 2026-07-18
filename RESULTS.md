@@ -212,6 +212,28 @@ seeds**. The dissociation survives error bars in both directions. (The learned
 mean settled at +0.80, below the +0.92 of the first single run — averaging over
 seeds corrected an optimistic draw, which is exactly why the error bars matter.)
 
+Harder, confound-free goal (reach the room CENTRE — stay away from all walls;
+5 seeds). "Approach the nearest wall" was criticised as too easy: a bounded box
+drifts random walkers toward walls for free (that is why random actions scored
++0.55). Reaching the centre is the opposite — random drift moves *away* from it:
+
+| controller (reach-centre) | wall-distance increase (m) |
+|---------------------------|---------------------------:|
+| learned MPC               | **+0.859 ± 0.070**         |
+| analytic (greedy, true geometry) | +0.577              |
+| random-encoder MPC        | −0.339 ± 0.088             |
+| random actions            | −0.551                     |
+
+Now random actions FAIL (−0.55) — the confound is gone, the task genuinely
+requires purposeful navigation — yet the learned world model still succeeds
+(+0.86), beats random actions by ~1.4 m, and the learned−random-encoder gap
+GROWS to +1.198 ± 0.106, positive on every seed. The learned MPC even beats the
+greedy analytic controller (+0.86 vs +0.58): the analytic heads straight at the
+centre at full stride and overshoots a point target, while CEM-MPC plans the
+whole 6-step horizon and settles — horizon planning beating myopic greedy is
+exactly what a world model should buy. The control-positive is not an artifact
+of an easy goal.
+
 ## Hyperparameter sweep (JEPA's best shot — negative holds)
 
 To be fair to JEPA before concluding, swept the knobs most likely to help it
