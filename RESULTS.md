@@ -234,6 +234,18 @@ whole 6-step horizon and settles — horizon planning beating myopic greedy is
 exactly what a world model should buy. The control-positive is not an artifact
 of an easy goal.
 
+Closed-loop MPC (live re-observation, 40 FRESH rooms). A persistent C++
+`observe_server` renders the real monostatic observation at any queried pose, so
+`control_mpc.py --closed-loop` runs receding-horizon MPC: re-observe the real sim
+at the true pose each step, re-plan, execute only the first action. On 40 rooms
+whose seeds were never in training, queried through the actual renderer (reach-
+centre): closed-loop +0.531 ± 0.125 vs open-loop +0.580 ± 0.161, difference
+−0.049 ± 0.096 — **no significant difference**. Over a short 6-step horizon with
+smooth near-deterministic dynamics the open-loop rollout is already accurate
+enough that re-observation corrects little drift. This closes the open-loop
+caveat (it doesn't matter here) and doubles as a live-renderer transfer check on
+unseen rooms.
+
 ## Hyperparameter sweep (JEPA's best shot — negative holds)
 
 To be fair to JEPA before concluding, swept the knobs most likely to help it

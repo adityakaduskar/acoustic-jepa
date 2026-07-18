@@ -29,6 +29,8 @@ import argparse
 import glob
 import math
 import os
+import struct
+import subprocess
 
 import numpy as np
 import torch
@@ -38,6 +40,8 @@ from model_xview import TwoStreamEncoder
 from model import Predictor, vicreg_var_cov
 
 DYAW_MAX, DSTEP_MAX = 45.0, 1.5
+RANGE_BINS, COCH = 256, 2 * 64 * 48
+SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "observe_server.exe")
 
 
 # ------------------------------------------------------------- data
@@ -229,6 +233,67 @@ def eval_controller(kind, wm, eps, dev, H=6, n_starts=150, seed=1, goal="wall"):
     return float(np.mean(scores)), float(np.std(scores) / math.sqrt(len(scores)))
 
 
+# ------------------------------------------------------------- closed-loop MPC
+class ObserveServer:
+    """Wraps tools/observe_server.exe: query the REAL simulator for the
+    observation at any pose (one persistent process per room seed)."""
+    def __init__(self, seed):
+        self.p = subprocess.Popen([SERVER, str(seed)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.dims = struct.unpack("<3f", self.p.stdout.read(12))   # (Lx, Ly, Lz) handshake
+
+    def observe(self, x, z, yaw):
+        self.p.stdin.write(struct.pack("<3f", float(x), float(z), float(yaw))); self.p.stdin.flush()
+        buf = self.p.stdout.read((RANGE_BINS + COCH) * 4)
+        a = np.frombuffer(buf, dtype=np.float32)
+        rng = a[:RANGE_BINS].copy(); coch = a[RANGE_BINS:].reshape(2, 64, 48).copy()
+        return coch, rng
+
+    def close(self):
+        try:
+            self.p.stdin.write(struct.pack("<3f", float("nan"), 0.0, 0.0)); self.p.stdin.flush()
+        except Exception:
+            pass
+        self.p.terminate()
+
+
+def eval_closed_loop(wm, seeds, dev, H=6, K=6, goal="wall", start_seed=100):
+    """Receding-horizon MPC: at each of K control steps, RE-OBSERVE the real sim
+    at the current true pose, encode, CEM-plan H, execute only the FIRST action.
+    Compares against open-loop (plan K once, execute all) on the same starts."""
+    g = np.random.default_rng(start_seed)
+    closed, openl = [], []
+    for seed in seeds:
+        srv = ObserveServer(seed)
+        room = srv.dims                              # (Lx, Ly, Lz) from the server handshake
+        # random valid start pose in this room
+        Lx, Lz = room[0], room[2]; m = 0.8
+        x0 = g.uniform(-Lx/2+m, Lx/2-m); z0 = g.uniform(-Lz/2+m, Lz/2-m); yaw0 = g.uniform(0, 360)
+        s_nwd = nwd_from_pose(x0, z0, room)
+
+        # closed loop
+        x, z, yaw = x0, z0, yaw0
+        for _ in range(K):
+            coch, rng = srv.observe(x, z, yaw)
+            zc = wm.enc(torch.tensor(coch[None], device=dev), torch.tensor(rng[None], device=dev))
+            acts = cem_plan(wm, zc, H, dev, goal=goal)
+            x, z, yaw = step_pose(x, z, yaw, float(acts[0, 0]), float(acts[0, 1]), room)   # first action only
+        c_nwd = nwd_from_pose(x, z, room)
+
+        # open loop from the same start: plan K once, execute all
+        x, z, yaw = x0, z0, yaw0
+        coch, rng = srv.observe(x, z, yaw)
+        zc = wm.enc(torch.tensor(coch[None], device=dev), torch.tensor(rng[None], device=dev))
+        acts = cem_plan(wm, zc, K, dev, goal=goal)
+        for k in range(K):
+            x, z, yaw = step_pose(x, z, yaw, float(acts[k, 0]), float(acts[k, 1]), room)
+        o_nwd = nwd_from_pose(x, z, room)
+        srv.close()
+
+        closed.append((s_nwd - c_nwd) if goal == "wall" else (c_nwd - s_nwd))
+        openl.append((s_nwd - o_nwd) if goal == "wall" else (o_nwd - s_nwd))
+    return closed, openl
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("data_dir")
@@ -237,12 +302,32 @@ def main():
     ap.add_argument("--starts", type=int, default=200)
     ap.add_argument("--repeats", type=int, default=1, help="training seeds for error bars")
     ap.add_argument("--goal", choices=["wall", "center"], default="wall")
+    ap.add_argument("--closed-loop", action="store_true",
+                    help="receding-horizon MPC re-observing the real sim each step (vs open-loop)")
+    ap.add_argument("--cl-rooms", type=int, default=40, help="held-out room seeds for closed-loop eval")
     args = ap.parse_args()
     dev = args.device
     G = args.goal
 
     eps = load_traj(args.data_dir)
     ntr = int(0.8 * len(eps)); tr, te = eps[:ntr], eps[ntr:]
+
+    if args.closed_loop:
+        print(f"training world model for closed-loop MPC (goal={G})...")
+        wm = train_wm(tr, dev, H=args.H, freeze_encoder=False, seed=0)
+        seeds = list(range(600, 600 + args.cl_rooms))     # FRESH room seeds (never in traj_data 1..200)
+        closed, openl = eval_closed_loop(wm, seeds, dev, H=args.H, K=args.H, goal=G)
+        c, o = np.array(closed), np.array(openl)
+        metric = "reduction (approach wall)" if G == "wall" else "increase (reach centre)"
+        se = lambda v: v.std(ddof=1) / math.sqrt(len(v))
+        print(f"\nwall-distance {metric} over {args.H} steps, {len(seeds)} FRESH held-out rooms "
+              f"(real-sim re-observation):")
+        print(f"  closed-loop MPC   {c.mean():+.3f} +/- {se(c):.3f} m")
+        print(f"  open-loop  MPC    {o.mean():+.3f} +/- {se(o):.3f} m")
+        d = c - o
+        print(f"  closed - open     {d.mean():+.3f} +/- {se(d):.3f}  "
+              f"({'closed-loop helps' if d.mean() > 2*se(d) else 'no significant difference'})")
+        return
     print(f"trajectory data: {len(eps)} episodes ({ntr} train / {len(te)} test), H={args.H}, "
           f"repeats={args.repeats}, goal={G}")
 

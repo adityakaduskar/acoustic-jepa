@@ -39,7 +39,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-for %%T in (jepa_dump swarm_dump scene_dump) do (
+for %%T in (jepa_dump swarm_dump scene_dump observe_server) do (
     cl /nologo /EHsc /O2 /std:c++17 ^
        /I "%SA_INC%" ^
        %%T.cpp ^
