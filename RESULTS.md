@@ -114,6 +114,38 @@ even direct supervision doesn't exceed the raw baseline (or fails to generalise)
 On this simulator the decodable geometry is best accessed by *not* learning a
 representation.
 
+## Why raw / random win (mechanism, verified)
+
+Hand-computed low-order statistics per observation, ridge-probed (room split):
+
+| target   | 3 reverb stats | 7 hand-stats | raw (192-d) |
+|----------|---------------:|-------------:|------------:|
+| room_vol |          0.682 |        0.752 |       0.860 |
+| peer_pos |            —   |        0.005 |       0.120 |
+
+Three numbers -- the range profile's delay centroid, its spread, and the
+late/early energy ratio -- recover 0.68 R² on room volume (~80% of the full raw
+features). That is Sabine-style physics: bigger room -> longer, more-spread
+reverberation -> the echo's energy-vs-delay distribution IS a volume gauge, and
+pooling is exactly the operation that computes it. So:
+
+- **raw wins** because pooling = computing the statistics the target is linearly
+  encoded in; there is no high-order structure to disentangle, and any learned
+  objective only compresses that variance away.
+- **random wins** two ways: on room_vol (linearly accessible) a random linear
+  projection is a near-isometry (Johnson-Lindenstrauss) that preserves linear
+  decodability; on peer_pos (a distributed NONLINEAR cue -- the coarse hand-stats
+  fail at 0.005 -- from the bistatic delay-ellipse + fine ITD/ILD) the untrained
+  CNN is a random nonlinear feature bank (random features / kitchen sinks;
+  conv+pool prior regardless of weights) that an MLP reads at 0.208, above any
+  learned encoder.
+
+Unifying point: the geometry is already exposed by FIXED operations (pooling,
+random projection); representation learning's one job -- surfacing hidden
+structure -- is unnecessary here, so training only discards variance. Hence the
+monotonic ordering: the more a method compresses, the more exposed geometry it
+loses.
+
 ## What this does and does not establish
 
 - It is consistent with v1's 2000-room plateau (~0.1 R² below raw); scaling 400→2000
