@@ -146,6 +146,42 @@ structure -- is unnecessary here, so training only discards variance. Hence the
 monotonic ordering: the more a method compresses, the more exposed geometry it
 loses.
 
+## Control test (latent-MPC navigation) — the dissociation
+
+"Poor geometry probe" and "poor control substrate" are different questions. An
+action-conditioned two-stream world model (encoder + latent dynamics + nearest-
+wall readout) was trained on monostatic trajectory data; open-loop CEM-MPC plans
+H=6 actions to approach the nearest wall, executed in TRUE pose (analytic
+dynamics), scored by true nearest-wall-distance reduction (held-out rooms, 200
+starts):
+
+| controller           | nwd reduction (m) |
+|----------------------|------------------:|
+| analytic (oracle)    | **+1.059** ± 0.075 |
+| learned MPC          | **+0.922** ± 0.074 |
+| random actions       |  +0.530 ± 0.089 |
+| random-encoder MPC   |  **−0.106** ± 0.028 |
+
+**This flips the probe result.** The learned world model navigates at 87% of the
+analytic oracle, while the random-encoder world model — the encoder that *tied or
+beat* the learned one on every geometry probe — FAILS, doing worse than random
+actions (its confident plans move *away* from walls).
+
+Mechanism (the resolution of the whole arc): MPC needs the latent's **dynamics**
+to be predictable under actions, not its statics to be decodable. A random
+encoder has decodable geometry (good probe) but *chaotic* dynamics — a small pose
+change maps through the fixed random nonlinearity to an arbitrary latent jump —
+so the predictor cannot roll it forward and CEM optimises a broken model
+(worse-than-random). The learned encoder is trained *jointly* to make its latent
+predictable under actions; it trades some static decodability for **dynamical
+predictability**, which is exactly what model-based control consumes.
+
+So: static decodability (probes) and dynamical predictability (control) are
+different properties. Raw pooling / random projection win the first; only a
+learned predictive representation delivers the second. Predictive SSL's value
+here is not exposing geometry (raw already does) but making dynamics
+plannable.
+
 ## What this does and does not establish
 
 - It is consistent with v1's 2000-room plateau (~0.1 R² below raw); scaling 400→2000
