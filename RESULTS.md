@@ -212,6 +212,35 @@ seeds**. The dissociation survives error bars in both directions. (The learned
 mean settled at +0.80, below the +0.92 of the first single run — averaging over
 seeds corrected an optimistic draw, which is exactly why the error bars matter.)
 
+## Hyperparameter sweep (JEPA's best shot — negative holds)
+
+To be fair to JEPA before concluding, swept the knobs most likely to help it
+retain geometry (VICReg variance weight, coch-loss weight, epochs, capacity, lr),
+10 configs, nonlinear-probed vs baselines (raw room_vol 0.930 / peer_pos 0.093;
+random 0.898 / 0.186):
+
+| config              | room_vol | peer_pos |
+|---------------------|---------:|---------:|
+| default             |   0.835  |  0.085   |
+| var=4               |   0.810  |  0.073   |
+| var=16              |   0.683  |  0.059   |
+| lam=1.0             |   0.839  |  0.098   |
+| lam=0 (range-only)  |   0.829  |  0.097   |
+| epochs=20           |   0.815  |  0.074   |
+| epochs=20, var=4    |   0.809  |  0.070   |
+| lr=3e-4             | **0.849**|  0.091   |
+| emb=256             |   0.842  | **0.113**|
+| var4,lam1,e30       |   0.807  |  0.074   |
+
+Verdict: **even the best-tuned JEPA loses.** On room_vol (the strong target) no
+config approaches raw (best 0.849 vs raw 0.930, all below random 0.898). On the
+weak peer_pos target a few configs marginally edge raw (0.093) but stay far below
+random (0.186) — none beats the best baseline on either target. Mechanistic
+note: cranking VICReg variance (var=16) made room_vol *worse* (0.683), so the
+compression is not fixed by forcing variance retention — the predictive objective
+reshapes toward predictability regardless. The geometry negative is robust to
+tuning, not a hyperparameter artifact.
+
 ## What this does and does not establish
 
 - It is consistent with v1's 2000-room plateau (~0.1 R² below raw); scaling 400→2000
