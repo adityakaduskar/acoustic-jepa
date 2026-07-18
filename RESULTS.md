@@ -212,6 +212,21 @@ seeds**. The dissociation survives error bars in both directions. (The learned
 mean settled at +0.80, below the +0.92 of the first single run — averaging over
 seeds corrected an optimistic draw, which is exactly why the error bars matter.)
 
+Scale (400 → 2000 rooms — the last extrapolation, now measured). Retrained and
+re-probed at 2000 rooms (1600 train / 400 test, 48k train pairs; latent
+rank →100/256, no collapse). Nonlinear probe:
+
+| target (nonlinear) | 400 rooms (J / raw / rnd) | 2000 rooms (J / raw / rnd) |
+|--------------------|---------------------------|----------------------------|
+| room_vol R²        | 0.795 / 0.930 / 0.903     | 0.848 / 0.917 / 0.895      |
+| peer_pos R²        | 0.088 / 0.093 / 0.204     | 0.125 / 0.159 / 0.265      |
+
+raw/random still beat JEPA on every target at 2000. The room_vol gap NARROWED
+with data (0.135 → 0.069) but plateaued below raw without crossing — exactly v1's
+"narrows but plateaus ~0.1 below raw" scaling; and on peer_pos the random feature
+bank benefited MOST from scale (0.20 → 0.27), pulling further ahead. Scaling
+helps everyone and JEPA never catches up.
+
 Harder, confound-free goal (reach the room CENTRE — stay away from all walls;
 5 seeds). "Approach the nearest wall" was criticised as too easy: a bounded box
 drifts random walkers toward walls for free (that is why random actions scored
