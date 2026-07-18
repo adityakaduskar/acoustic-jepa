@@ -182,6 +182,36 @@ learned predictive representation delivers the second. Predictive SSL's value
 here is not exposing geometry (raw already does) but making dynamics
 plannable.
 
+## Robustness (error bars — both results hold)
+
+Both headline claims were re-run across seeds so the confidence is measured, not
+asserted.
+
+Experiment 1 (geometry negative), nonlinear probe over 3 JEPA checkpoints × 5
+random-encoder draws × 3 probe seeds:
+
+| target       | JEPA          | raw           | random        | verdict            |
+|--------------|--------------:|--------------:|--------------:|--------------------|
+| peer_pos R²  | 0.069 ± 0.012 | 0.091 ± 0.004 | 0.204 ± 0.012 | raw > JEPA (robust)|
+| room_vol R²  | 0.805 ± 0.006 | 0.931 ± 0.001 | 0.904 ± 0.004 | raw > JEPA (robust)|
+
+SDs are ~0.01 and raw beats JEPA by more than the combined spread on both — the
+negative is tight and reproducible, and JEPA loses to random too.
+
+Experiment 2 (control positive), 5 training seeds, fixed eval starts:
+
+| controller         | reduction (m)   |
+|--------------------|----------------:|
+| analytic (oracle)  | +0.985          |
+| learned MPC        | +0.798 ± 0.051  |
+| random actions     | +0.551          |
+| random-encoder MPC | −0.054 ± 0.138  |
+
+learned − random-encoder = +0.852 ± 0.132, **positive on every one of the 5
+seeds**. The dissociation survives error bars in both directions. (The learned
+mean settled at +0.80, below the +0.92 of the first single run — averaging over
+seeds corrected an optimistic draw, which is exactly why the error bars matter.)
+
 ## What this does and does not establish
 
 - It is consistent with v1's 2000-room plateau (~0.1 R² below raw); scaling 400→2000

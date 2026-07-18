@@ -227,28 +227,45 @@ def main():
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--H", type=int, default=6)
     ap.add_argument("--starts", type=int, default=200)
+    ap.add_argument("--repeats", type=int, default=1, help="training seeds for error bars")
     args = ap.parse_args()
     dev = args.device
 
     eps = load_traj(args.data_dir)
     ntr = int(0.8 * len(eps)); tr, te = eps[:ntr], eps[ntr:]
-    print(f"trajectory data: {len(eps)} episodes ({ntr} train / {len(te)} test), H={args.H}")
-    print("training learned world model...")
-    wm = train_wm(tr, dev, H=args.H, freeze_encoder=False)
-    print("training random-encoder world model...")
-    wm_rand = train_wm(tr, dev, H=args.H, freeze_encoder=True)
+    print(f"trajectory data: {len(eps)} episodes ({ntr} train / {len(te)} test), H={args.H}, "
+          f"repeats={args.repeats}")
 
-    print(f"\nnearest-wall-distance REDUCTION over {args.H} steps (higher=better; "
-          f"held-out rooms, {args.starts} starts):")
-    for kind, model in [("analytic (oracle)", None), ("learned MPC", wm),
-                        ("random-enc MPC", wm_rand), ("random actions", None)]:
-        k = {"analytic (oracle)": "analytic", "learned MPC": "learned",
-             "random-enc MPC": "random", "random actions": "rand-act"}[kind]
-        m = model if model is not None else wm
-        red, se = eval_controller(k, m, te, dev, H=args.H, n_starts=args.starts)
-        print(f"  {kind:20s} {red:+.3f} +/- {se:.3f} m")
-    print("\nread: learned >> random-enc => learning helps CONTROL even where it didn't help "
-          "geometry probes; learned ~ random-enc => the negative extends to control.")
+    EVAL_SEED = 100          # FIXED eval starts across repeats -> variance is from TRAINING seed only
+    learned_r, random_r = [], []
+    for r in range(args.repeats):
+        print(f"[seed {r}] training learned + random-encoder world models...")
+        wm = train_wm(tr, dev, H=args.H, freeze_encoder=False, seed=r)
+        wm_rand = train_wm(tr, dev, H=args.H, freeze_encoder=True, seed=r)
+        lr, _ = eval_controller("learned", wm, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED)
+        rr, _ = eval_controller("random", wm_rand, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED)
+        learned_r.append(lr); random_r.append(rr)
+        print(f"[seed {r}] learned {lr:+.3f}  random-enc {rr:+.3f}")
+
+    # seed-independent bounds (need a model arg but ignore it)
+    dummy = wm
+    an, _ = eval_controller("analytic", dummy, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED)
+    ra, _ = eval_controller("rand-act", dummy, te, dev, H=args.H, n_starts=args.starts, seed=EVAL_SEED)
+
+    def ms(v):
+        v = np.array(v); return v.mean(), (v.std(ddof=1) if len(v) > 1 else 0.0)
+    lm, ls = ms(learned_r); rm, rs = ms(random_r)
+    print(f"\nnearest-wall-distance REDUCTION over {args.H} steps (mean +/- SD over "
+          f"{args.repeats} training seeds; held-out rooms, {args.starts} fixed starts):")
+    print(f"  analytic (oracle)    {an:+.3f}            (seed-independent upper bound)")
+    print(f"  learned MPC          {lm:+.3f} +/- {ls:.3f}")
+    print(f"  random actions       {ra:+.3f}            (seed-independent lower-ish bound)")
+    print(f"  random-enc MPC       {rm:+.3f} +/- {rs:.3f}")
+    if args.repeats > 1:
+        gap = np.array(learned_r) - np.array(random_r)
+        print(f"\nlearned - random-enc per-seed: {[round(g,3) for g in gap]}  "
+              f"-> mean {gap.mean():+.3f} +/- {gap.std(ddof=1):.3f} "
+              f"({'ROBUST: learned>random every seed' if (gap>0).all() else 'NOT robust'})")
 
 
 if __name__ == "__main__":
