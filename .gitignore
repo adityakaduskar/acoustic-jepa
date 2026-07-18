@@ -20,3 +20,6 @@ swarm_data/
 .venv/
 __pycache__/
 *.pyc
+
+# Rendered scene outputs (regenerable via scene_dump.exe + render_scenes.py)
+results/scenes/
