@@ -249,6 +249,17 @@ whole 6-step horizon and settles — horizon planning beating myopic greedy is
 exactly what a world model should buy. The control-positive is not an artifact
 of an easy goal.
 
+Scale (control, 200 → 1000 trajectory rooms). The room-scaling had only been
+applied to the probes (experiment 1); applied to control (experiment 2),
+reach-centre, 5 seeds, 1000 rooms (800 train / 200 test): learned +0.634 ± 0.051,
+analytic (greedy) +0.234, random-encoder −0.098 ± 0.168, random actions −0.639.
+Learned beats random-encoder on every seed (gap +0.732 ± 0.140) and still beats
+the greedy analytic (+0.63 vs +0.23). The absolute values all dropped *together*
+(learned, analytic, and random all lower than the 200-room set) — a property of
+this test set's rooms/starts (less distance to gain; the oracle itself only makes
++0.23), not the learned model degrading with data. Every qualitative relationship
+holds: the control-positive is robust to scale, matching the probe-side scaling.
+
 Closed-loop MPC (live re-observation, 40 FRESH rooms). A persistent C++
 `observe_server` renders the real monostatic observation at any queried pose, so
 `control_mpc.py --closed-loop` runs receding-horizon MPC: re-observe the real sim
