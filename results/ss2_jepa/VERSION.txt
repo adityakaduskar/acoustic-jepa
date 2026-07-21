@@ -1,0 +1,72 @@
+Acoustic-JEPA on SoundSpaces 2.0 — replication environment
+(see ss2_jepa_manifest.md; §8 "definition of done")
+
+date: 2026-07-18
+host: WSL2 Ubuntu, Linux 6.6.114.1-microsoft-standard-WSL2, 24 cores, 31 GB RAM
+GPU: NVIDIA GeForce RTX 5080 Laptop (16 GB), CUDA 12.8
+conda env: ss
+
+ENGINE
+  habitat-sim: 0.2.2  (pypi wheel, with AudioSensor / RLR audio propagation)
+    installed at .../envs/ss/lib/python3.9/site-packages/habitat_sim
+  habitat-sim source tree: ~/habitat-sim @ 4f61e321477708fa606fbd8f42b4bef41d67c672
+  rlr-audio-propagation: ~/habitat-sim/src/deps/rlr-audio-propagation
+    @ 4fd446b4abb5c71fb7a232a083bbddd65f25fc6f
+    lib: RLRAudioPropagationPkg/libs/linux/x64/libRLRAudioPropagation.so
+    (no version string is exposed by the library itself)
+  sound-spaces repo: /home/aditya/sound-spaces @ 287184fd7067a0385558492716355c54875500ee
+  habitat-lab: not installed (not required; RIRs are rendered through
+    habitat_sim.AudioSensor directly)
+
+PYTHON
+  python 3.9.25 | numpy 1.26.4 | scipy 1.13.1 | trimesh 4.12.2 | torch 2.8.0+cu128
+  The jepa/*.py pipeline ran UNCHANGED on this interpreter (every script used
+  carries `from __future__ import annotations`, so its 3.10+ type syntax is
+  fine on 3.9). No file in jepa/ was modified.
+
+REFERENCE (the engine being compared against)
+  AcousticJEPA repo: /mnt/d/Unreal Projects/TP_Project1/AcousticJEPA
+    @ ab4718e2062481369e6681ed61f9f014fa5d163b
+  Steam Audio 4.8.1, results in that repo's RESULTS.md
+
+RENDER CONFIG (ss2_jepa_env.py)
+  sample rate            48000 Hz
+  max IR length          0.5 s (0.2 s for the direct-only sensor)
+  channel layouts        Ambisonics order 1 (4ch, W used) + Binaural (2ch)
+  indirectRayCount       5000
+  indirectRayDepth       200
+  sourceRayCount / depth 200 / 10
+  directRayCount         500
+  threadCount            1 per worker process (20 worker processes)
+  direct                 OFF for observations, ON for the direct-only sensor
+  indirect               ON  for observations, OFF for the direct-only sensor
+  diffraction            OFF   (RLR bends the DIRECT path only, and only with
+                                meshSimplification ON; Steam Audio rendered no
+                                edge diffraction either)
+  transmission           OFF   (SS2 battery E11: the transmission path injects a
+                                late diffuse smear rather than a physical
+                                through-wall arrival; Steam Audio's transmission
+                                was inert for reflections, so OFF is the match)
+  meshSimplification     OFF
+  HRTF                   RLR engine-default (not swapped per agent; the Steam
+                         Audio dataset also used one default HRTF for all agents)
+
+MATERIALS
+  The 4-material table of acoustic_env.h::material_table(), mapped onto RLR's
+  (frequency, value) breakpoint curves with Steam Audio's nominal 800 Hz / 8 kHz
+  crossovers held piecewise-constant:
+    plaster  abs {0.10, 0.15, 0.20}  scat 0.20
+    tile     abs {0.01, 0.01, 0.02}  scat 0.10
+    carpet   abs {0.30, 0.50, 0.60}  scat 0.50
+    mirror   abs {0.00, 0.00, 0.00}  scat 0.00
+  transmission is 0 for all four (see the transmission flag note above).
+  Materials bind through the semantic-mesh chain; RLR matches a material by its
+  "name" field against the semantic CLASS name, so each material is named after
+  the surface label it is applied to.
+
+SCRIPTS (copied into this directory)
+  ss2_jepa_env.py     the observation operator (the only engine-specific code)
+  ss2_swarm_dump.py   cross-view dataset generator   (port of swarm_dump.cpp)
+  ss2_traj_dump.py    trajectory dataset generator   (port of jepa_dump.cpp)
+  ss2_jepa_smoke.py   pre-generation validation of the operator
+  ss2_jepa_verify.py  post-generation dataset integrity check

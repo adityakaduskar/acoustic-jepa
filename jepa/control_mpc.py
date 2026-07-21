@@ -41,7 +41,9 @@ from model import Predictor, vicreg_var_cov
 
 DYAW_MAX, DSTEP_MAX = 45.0, 1.5
 RANGE_BINS, COCH = 256, 2 * 64 * 48
-SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "observe_server.exe")
+SERVER = os.environ.get(
+    "OBSERVE_SERVER",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "observe_server.exe"))
 
 
 # ------------------------------------------------------------- data
@@ -256,12 +258,18 @@ class ObserveServer:
         self.p.terminate()
 
 
-def eval_closed_loop(wm, seeds, dev, H=6, K=6, goal="wall", start_seed=100):
+def eval_closed_loop(wm, seeds, dev, H=6, K=6, goal="wall", start_seed=100, log_dir=None):
     """Receding-horizon MPC: at each of K control steps, RE-OBSERVE the real sim
     at the current true pose, encode, CEM-plan H, execute only the FIRST action.
-    Compares against open-loop (plan K once, execute all) on the same starts."""
+    Compares against open-loop (plan K once, execute all) on the same starts.
+
+    If log_dir is set, dump per room the closed-loop poses, the CEM plan at each
+    step (the world model's IMAGINED future), and the observations, so
+    ss2_traj_render.py can draw the imagined-vs-actual trajectory."""
     g = np.random.default_rng(start_seed)
     closed, openl = [], []
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
     for seed in seeds:
         srv = ObserveServer(seed)
         room = srv.dims                              # (Lx, Ly, Lz) from the server handshake
@@ -271,13 +279,23 @@ def eval_closed_loop(wm, seeds, dev, H=6, K=6, goal="wall", start_seed=100):
         s_nwd = nwd_from_pose(x0, z0, room)
 
         # closed loop
+        rec_pose, rec_plan, rec_coch, rec_rng = [], [], [], []
         x, z, yaw = x0, z0, yaw0
         for _ in range(K):
             coch, rng = srv.observe(x, z, yaw)
             zc = wm.enc(torch.tensor(coch[None], device=dev), torch.tensor(rng[None], device=dev))
             acts = cem_plan(wm, zc, H, dev, goal=goal)
+            if log_dir:
+                rec_pose.append((x, 1.6, z, yaw)); rec_plan.append(np.asarray(acts, np.float32))
+                rec_coch.append(coch.astype(np.float16)); rec_rng.append(rng.astype(np.float16))
             x, z, yaw = step_pose(x, z, yaw, float(acts[0, 0]), float(acts[0, 1]), room)   # first action only
         c_nwd = nwd_from_pose(x, z, room)
+        if log_dir:
+            rec_pose.append((x, 1.6, z, yaw))        # final pose (no plan after it)
+            np.savez(os.path.join(log_dir, f"cl_{goal}_seed{seed}.npz"),
+                     pose=np.array(rec_pose, np.float32), plan=np.array(rec_plan, np.float32),
+                     coch=np.array(rec_coch, np.float16), range=np.array(rec_rng, np.float16),
+                     room=np.array(room, np.float32), goal=goal, seed=seed, H=H)
 
         # open loop from the same start: plan K once, execute all
         x, z, yaw = x0, z0, yaw0
@@ -305,6 +323,7 @@ def main():
     ap.add_argument("--closed-loop", action="store_true",
                     help="receding-horizon MPC re-observing the real sim each step (vs open-loop)")
     ap.add_argument("--cl-rooms", type=int, default=40, help="held-out room seeds for closed-loop eval")
+    ap.add_argument("--log-dir", default=None, help="if set, dump per-room closed-loop pose+plan+obs for rendering")
     args = ap.parse_args()
     dev = args.device
     G = args.goal
@@ -316,7 +335,7 @@ def main():
         print(f"training world model for closed-loop MPC (goal={G})...")
         wm = train_wm(tr, dev, H=args.H, freeze_encoder=False, seed=0)
         seeds = list(range(600, 600 + args.cl_rooms))     # FRESH room seeds (never in traj_data 1..200)
-        closed, openl = eval_closed_loop(wm, seeds, dev, H=args.H, K=args.H, goal=G)
+        closed, openl = eval_closed_loop(wm, seeds, dev, H=args.H, K=args.H, goal=G, log_dir=args.log_dir)
         c, o = np.array(closed), np.array(openl)
         metric = "reduction (approach wall)" if G == "wall" else "increase (reach centre)"
         se = lambda v: v.std(ddof=1) / math.sqrt(len(v))
