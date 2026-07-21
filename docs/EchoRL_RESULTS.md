@@ -303,6 +303,26 @@ uncertainty-penalised / trust-region planning — *not* to naive accuracy maximi
 this refutes the simplest fix, not MPC in general; the on-policy variant is the indicated
 next step and is untested here.
 
+### 5.3 Experiment B (gate) — when does the task *need* planning?
+
+§5–§5.2 are all on nobs=0 (empty doorway rooms), where a greedy head-to-goal controller is
+optimal — so model-free's win there is partly structural. `echorl/gate_b.py` checks, on
+**privileged geometry (no echoes)**, whether cluttered rooms demand lookahead: greedy
+head-to-goal vs a receding-horizon planner, both with the env's exact goal-mode rules
+(non-terminal collision blocks translation). 12 rooms × 10 starts:
+
+| tier | greedy oracle | planning oracle | gap |
+|---|---|---|---|
+| nobs=0 | 1.00 | 1.00 | +0.00 → **reactive-sufficient** (confirms §5's task needs no planning) |
+| nobs=3 | **0.57** | **1.00** | **+0.43 → NEEDS PLANNING** (pillars block the doorway route) |
+
+So the cluttered doorway task is genuinely discriminative: reactive control caps at 0.57
+while planning reaches 1.00. This is the regime where model-based control *should* earn its
+keep, making it the decisive next test of whether the §5.2 objective-mismatch failure
+persists when planning is not just helpful but **necessary**. (Full nobs=3 four-way run —
+PPO vs learned-WM MPC vs direct-outcome MPC vs oracles — is the pending Experiment B; the
+gate authorises it.)
+
 ## 6. Summary of findings
 
 1. **Echo-only 3D navigation works and is near-optimal for avoidance** — PPO matches a
