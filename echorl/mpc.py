@@ -138,6 +138,21 @@ def collect_traj(seeds, n_ep, dev, nobs=0, t_max=40, base_seed=7, forward_bias=0
     return [ep for r in results for ep in r]
 
 
+def save_corpus(path, eps):
+    """Persist the ragged (range, coch, act, dist) episode list. The render is not
+    bit-deterministic (~1% jitter), so this is a time-saver, not a reproducibility
+    guarantee -- reuse it to avoid re-simulating across probe/experiment reruns."""
+    import pickle
+    with open(path, "wb") as f:
+        pickle.dump(eps, f, protocol=4)
+
+
+def load_corpus(path):
+    import pickle
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
 def build_windows(eps, H):
     C, R, A, DD = [], [], [], []
     for (r, c, a, d) in eps:
@@ -297,6 +312,11 @@ def main():
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--repeats", type=int, default=1, help="training seeds for CIs (corpus collected once)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--corpus-in", default=None, help="load a cached trajectory corpus instead of simulating")
+    ap.add_argument("--corpus-out", default=None, help="save the collected corpus here (reuse via --corpus-in)")
+    ap.add_argument("--save-wm", default=None, help="checkpoint the first-seed learned WM here (for probe_dd.py)")
+    ap.add_argument("--skip-eval", action="store_true",
+                    help="collect + train + save only (no closed-loop controller eval); for building probe inputs")
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
     if args.smoke:
@@ -309,10 +329,27 @@ def main():
           f"{len(train_seeds)} train / {len(eval_seeds)} eval doorway rooms")
 
     t0 = time.time()
-    print(f"collecting {args.train_ep} random exploratory trajectories (once, shared across seeds)...")
-    eps = collect_traj(train_seeds, args.train_ep, dev, nobs=args.nobs, base_seed=7)
+    if args.corpus_in and os.path.exists(args.corpus_in):
+        eps = load_corpus(args.corpus_in)
+        print(f"loaded cached corpus {os.path.relpath(args.corpus_in)}: {len(eps)} episodes ({time.time()-t0:.0f}s)")
+    else:
+        print(f"collecting {args.train_ep} random exploratory trajectories (once, shared across seeds)...")
+        eps = collect_traj(train_seeds, args.train_ep, dev, nobs=args.nobs, base_seed=7)
+        if args.corpus_out:
+            save_corpus(args.corpus_out, eps)
+            print(f"  saved corpus -> {os.path.relpath(args.corpus_out)}")
     nwin = sum(max(0, a.shape[0] - args.H) for (_, _, a, _) in eps)
     print(f"  {len(eps)} episodes, {nwin} H-windows ({time.time()-t0:.0f}s)")
+
+    if args.skip_eval:
+        wm = train_wm(eps, dev, H=args.H, epochs=args.epochs, freeze_encoder=False, seed=args.seed)
+        print(f"  WM diagnostic: readout-R2 {wm.diag['readout_r2']:+.2f} "
+              f"rollout-MAE {wm.diag['rollout_mae']:.2f}m (naive {wm.diag['base_mae']:.2f}m)")
+        if args.save_wm:
+            torch.save({"model": wm.state_dict(), "H": args.H, "diag": wm.diag}, args.save_wm)
+            print(f"  saved learned WM -> {os.path.relpath(args.save_wm)}")
+        print(f"skip-eval: corpus + WM ready ({time.time()-t0:.0f}s)")
+        return
 
     # oracle is seed-independent (deterministic given eval starts) -> compute once
     orc, orc_st = eval_controller("oracle", None, eval_seeds, dev, H=args.H,
@@ -324,6 +361,9 @@ def main():
         sd = args.seed + r
         wm = train_wm(eps, dev, H=args.H, epochs=args.epochs, freeze_encoder=False, seed=sd)
         wm_rand = train_wm(eps, dev, H=args.H, epochs=args.epochs, freeze_encoder=True, seed=sd)
+        if args.save_wm and r == 0:
+            torch.save({"model": wm.state_dict(), "H": args.H, "diag": wm.diag}, args.save_wm)
+            print(f"  saved learned WM (seed {sd}) -> {os.path.relpath(args.save_wm)}")
         ls, _ = eval_controller("learned", wm, eval_seeds, dev, H=args.H,
                                 episodes_per=args.episodes_per, nobs=args.nobs)
         rs, _ = eval_controller("random-enc", wm_rand, eval_seeds, dev, H=args.H,

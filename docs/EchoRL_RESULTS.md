@@ -8,8 +8,10 @@ reverberant acoustics. 3D, rendered-acoustics successor to Mohan & Vanderelst 20
 Status as of **2026-07-21**: Stage 0 (obstacle avoidance) and Stage 2 (goal
 approach / doorway-finding) both complete, with oracle ceilings, ablations, and
 multi-seed CIs; plus a **model-based (learned-world-model CEM-MPC) vs model-free (PPO)**
-comparison on the doorway task (§5). All numbers below are on **held-out rooms** (seed
-band 600+, disjoint from training seeds 1–60 and the 3000+ corpus band).
+comparison on the doorway task (§5), a Δd probe diagnosing the MPC gap (§5.1), and an
+objective-mismatch result where a near-perfect cost model plans *worse* (§5.2). All numbers
+below are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the
+3000+ corpus band).
 
 Single machine: 24 logical CPUs, CUDA GPU, torch 2.11+cu128.
 
@@ -234,6 +236,73 @@ perception is fine), so it is not mere data starvation. A stronger action-condit
 dynamics model (or longer horizon) might narrow the gap; that the readout already saturates
 while the rollout does not is the point.
 
+### 5.1 Experiment A — the Δd probe: *why* the dynamics is blind (H0/H1/H2)
+
+`echorl/probe_dd.py` isolates the cause of §5's "rollout = naive" result. Identical
+small-MLP probes predict the one-step **Δd = d(t+1)−d(t)** (mean −0.01, sd 0.29 m over
+12,171 held-out step-pairs) from different inputs; the WM's own predictor path is shown for
+reference. Held-out R² (best over epochs, 3 probe seeds):
+
+| probe input | R² | reads as |
+|---|---|---|
+| `raw ping + a` (H0 test) | **+0.43 ± 0.01** | the info **is** in one ping+action — but only ~43% determined (myopic cue) |
+| `z + a` (trained latent + action) | **+0.42 ± 0.01** | encoder keeps ~all of it — **not** discarded (rejects H1) |
+| `z` only (control) | +0.25 | state alone predicts typical Δd under the random policy |
+| `a` only (control) | +0.01 | action alone is useless — Δd is a state×action interaction |
+| **WM predictor path** `readout(pred(z,a))−readout(z)` | **+0.24** | **what CEM actually plans on — barely above z-only, the fixable defect** |
+
+**Verdict: H2, with a partial-H0 ceiling.** The action-consequence information survives into
+the latent (`z+a` = 0.42 ≈ raw ceiling 0.43), so neither the ping nor the encoder is the
+problem. But the trained Predictor+readout path delivers only **0.24** — *below* even the
+state-only 0.25, i.e. its action-conditioning contributes **nothing** to the goal-distance
+estimate CEM optimises. Likely cause: the latent-MSE dynamics loss is spread over all 256
+dims (the goal-relevant subspace is a tiny fraction), and `readout` was trained on *encoded*
+latents, so it generalises poorly to *predicted* ones. Two stacked limits result:
+- **accuracy-fixable (H2):** the predictor path (0.24) sits far below the achievable
+  single-ping consequence R² (0.42) — a *direct* consequence head recovers the *accuracy*
+  (Exp C hits R²=0.96 on the planning cost). **But recovering accuracy did NOT recover
+  control — it made it worse (§5.2).** So accuracy was never the true bottleneck;
+- **fundamental (partial H0):** even the single-ping ceiling is 0.42, so open-loop planning
+  over one ping is intrinsically myopic — which is why model-free reactive control (many
+  pings, active scanning) has the structural edge on this cue, and why the MPC gets 0.46
+  only because it *re-plans closed-loop* each step rather than trusting a long rollout.
+
+### 5.2 Experiment C — the informed rematch, and why "fix the model" backfired
+
+A hovers between "the dynamics is inaccurate" (H2) and "the cue is myopic" (partial H0).
+Exp C tests the H2 reading head-on. The env is **step-then-turn** (translation uses the
+current yaw, `dyaw` only pays off later), so a 1-step head can't value turning; the fix is a
+**multi-step outcome head** `g_H(z0, a₁..H) → Σ_{k} d(t+k)` — one network mapping the initial
+latent + whole action sequence directly to the **cumulative distance CEM minimises**, trained
+on the frozen learned encoder. This swaps *only* the cost estimator (compositional latent
+rollout → direct outcome head); same encoder, corpus, CEM, and cost functional.
+Code: `echorl/mpc_direct.py`. 12 held-out rooms × 10 starts, 3 head-training seeds:
+
+| Controller | success | cost-model quality |
+|---|---|---|
+| Oracle (privileged) | 1.00 | — |
+| Model-free PPO | ~0.85 | — |
+| **Learned-WM MPC** (compositional rollout, §5) | **0.51** | rollout ≈ naive (R²≈0.24, §5.1) |
+| **Direct-outcome MPC** (the "fix") | **0.29 ± 0.02** | predicts the cost at **R² 0.96 ± 0.01** |
+
+**The near-perfect cost model is the worse controller (0.29 vs 0.51).** With everything else
+held fixed, quadrupling+ the cost-model accuracy *halved* success. This is **objective
+mismatch** (model accuracy ≠ control performance) demonstrated by a clean A/B: CEM does not
+query the training distribution — it *optimises against the model*, proposing goal-directed
+action sequences the random-exploration corpus never contained. The high-capacity direct head
+is accurate on-distribution (0.96) but has sharp, exploitable minima off-distribution, so CEM
+finds sequences it wrongly believes minimise distance. The compositional rollout, despite far
+worse nominal accuracy, is a smoother, more constrained function (residual latent steps + a
+shared readout) whose errors are *less exploitable* — so it plans better.
+
+**This reframes §5 and §5.1.** The learned-WM MPC does not trail PPO because its dynamics is
+inaccurate — making the dynamics accurate makes control *worse*. The real bottleneck is the
+**planner–model interaction under distribution shift**, which points to on-policy data
+aggregation (retrain the outcome model on the MPC's own optimised trajectories) or
+uncertainty-penalised / trust-region planning — *not* to naive accuracy maximisation. Caveat:
+this refutes the simplest fix, not MPC in general; the on-policy variant is the indicated
+next step and is untested here.
+
 ## 6. Summary of findings
 
 1. **Echo-only 3D navigation works and is near-optimal for avoidance** — PPO matches a
@@ -254,6 +323,17 @@ while the rollout does not is the point.
    rollout-MAE = naive). Yet learning still helps the planner (learned-MPC 0.46 ≫
    random-encoder 0.06), replicating the AcousticJEPA control-positive dissociation in a
    model-based paradigm.
+6. **A better cost-model made a worse controller — objective mismatch (§5.2).** Swapping the
+   compositional latent rollout for a direct outcome head that predicts the planning cost at
+   R²=0.96 (vs ≈0.24) *halved* MPC success (0.29 vs 0.51), everything else fixed. CEM
+   exploits the accurate-but-high-capacity model off the training distribution; the
+   inaccurate-but-smooth rollout is less exploitable. The MPC bottleneck is the
+   planner–model interaction under distribution shift, not model accuracy — so the fix is
+   on-policy/conservative planning, not a better forward model.
+7. **Probe diagnosis (§5.1):** the action-consequence info is in a single ping (raw+a
+   R²=0.43) and kept by the encoder (z+a R²=0.42), but the trained predictor path throws it
+   away (0.24). Even so, the single-ping ceiling (0.43) is low — the cue is intrinsically
+   myopic, favouring reactive control.
 
 ## 7. Honest limitations (for a writeup)
 - Not a scored head-to-head with Mohan & Vanderelst: different sim (2D analytic vs 3D
@@ -289,6 +369,13 @@ python echorl/ppo.py --task goal --nobs 0 --drop-coch --tag rangeonly   # etc.
 # Model-based MPC vs model-free PPO (§5): learned vs random-encoder WM, oracle ceiling
 python echorl/mpc.py --repeats 3 --train-rooms 60 --eval-rooms 12 --train-ep 360 --episodes-per 10
 python echorl/mpc.py --smoke      # fast end-to-end pipeline check
+# cache a corpus + learned WM (for the probe / rematch), no closed-loop eval:
+python echorl/mpc.py --train-rooms 60 --train-ep 360 --skip-eval \
+    --corpus-out echorl/corpus_goal.pkl --save-wm echorl/ckpt/mpc_wm.pt
+# Exp A (§5.1) -- Delta-d probe (H0/H1/H2 diagnosis):
+python echorl/probe_dd.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt
+# Exp C (§5.2) -- informed rematch (direct outcome head; objective-mismatch result):
+python echorl/mpc_direct.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --seeds 3
 ```
 
 Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
@@ -297,4 +384,4 @@ Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
 its world model on the fly (random-trajectory corpus), so it saves no checkpoints.
 
 Code: `src/episode_server.cpp`, `src/verify_episode_server.py`,
-`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,collect_corpus,smoke_test}.py`.
+`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,mpc_direct,probe_dd,collect_corpus,smoke_test}.py`.

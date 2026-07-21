@@ -15,6 +15,7 @@ swarm_data/
 *.npz
 *.pt
 *.ckpt
+*.pkl
 
 # Python venv / caches
 .venv/
