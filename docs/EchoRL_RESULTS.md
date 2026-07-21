@@ -7,8 +7,9 @@ reverberant acoustics. 3D, rendered-acoustics successor to Mohan & Vanderelst 20
 
 Status as of **2026-07-21**: Stage 0 (obstacle avoidance) and Stage 2 (goal
 approach / doorway-finding) both complete, with oracle ceilings, ablations, and
-multi-seed CIs. All numbers below are on **held-out rooms** (seed band 600+, disjoint
-from training seeds 1–60 and the 3000+ corpus band).
+multi-seed CIs; plus a **model-based (learned-world-model CEM-MPC) vs model-free (PPO)**
+comparison on the doorway task (§5). All numbers below are on **held-out rooms** (seed
+band 600+, disjoint from training seeds 1–60 and the 3000+ corpus band).
 
 Single machine: 24 logical CPUs, CUDA GPU, torch 2.11+cu128.
 
@@ -182,7 +183,58 @@ binaural (two-ear) bearing cue.
 
 ---
 
-## 5. Summary of findings
+## 5. Model-based (MPC) vs model-free (PPO) — the same task, one comparison
+
+The comparison the substrate was built for: model-free RL vs a **learned-world-model
+CEM-MPC** controller on the *same* server, task, dynamics and metric. Also the bridge to
+AcousticJEPA (`RESULTS.md`), which found a *learned* world model plans well while a
+*random-encoder* one fails ("control-positive dissociation"). Code: `echorl/mpc.py`.
+
+**World model** (mirrors `jepa/control_mpc.py`, on `episode_server` data): normalized-echo
+`TwoStreamEncoder` → latent `z[256]`; action-conditioned residual `Predictor` (JEPA-style
+EMA-target dynamics loss); a `z → distance-to-goal` readout (the CEM cost). Trained on **360
+random exploratory trajectories** (~10k H-windows) — *not* the PPO policy, so a win/loss vs
+PPO is a fair model-based-vs-model-free result. **CEM** minimises the imagined
+distance-to-goal over an H=6 latent rollout; executes the first action; re-observes.
+Evaluated **closed-loop through the very same `EchoLocEnv`** PPO uses (identical collision,
+success, metric). Doorway task, nobs=0, 12 held-out rooms × 10 starts, 3 training seeds.
+
+| Controller | success (mean ± SD) |
+|---|---|
+| Oracle (privileged geometry, greedy to true goal) | **1.00** (ceiling) |
+| **Model-free PPO** (`ppo.py --task goal`) | **~0.85** |
+| **Learned-WM MPC** | **0.46 ± 0.05** |
+| Random-encoder MPC | **0.06 ± 0.03** (control lower bound) |
+
+WM diagnostic (held-out windows): learned readout-R² **+0.98** vs random-encoder **+0.49**;
+learned **rollout-MAE 0.60 m ≈ naive-"distance-unchanged" 0.60 m**.
+
+Two results, and the diagnostic explains both:
+
+1. **Model-free RL beats model-based latent-MPC (0.85 vs 0.46) — for a mechanistic, not a
+   tuning, reason.** The learned encoder decodes *where the goal is now* almost perfectly
+   (readout R²=0.98), but the action-conditioned **latent dynamics cannot predict what an
+   action does**: rolling the latent forward H steps predicts the resulting distance no
+   better than assuming it never changes (rollout-MAE = naive). CEM therefore plans over a
+   forward model blind to action consequences, and has little to optimise. PPO needs no
+   forward model — it follows the **binaural bearing gradient** over time (the exact cue
+   §4.3 fingered), which is a directional/temporal signal, not a plannable one-step
+   consequence. So *the cue structure of doorway-finding favours reactive bearing-following
+   over forward-model planning.*
+2. **Learning still matters for the planner too — the dissociation replicates in a new
+   paradigm.** Learned-WM MPC ≫ random-encoder MPC (0.46 vs 0.06; learned > random on every
+   seed, +0.40 ± 0.03). Exactly AcousticJEPA's "control-positive, random-encoder-fails"
+   result, now reproduced in **model-based planning control** (previously shown only for
+   latent-MPC on the wall/centre task): a random encoder can't decode the goal (R²=0.49) and
+   can't plan (0.06), a learned one can decode it (0.98) and plans partway (0.46).
+
+Caveat: different data/compute budgets (PPO ~150k task-reward env steps; WM 360 random
+trajectories) — but the bottleneck is diagnosed as the *dynamics* (readout R²=0.98 shows
+perception is fine), so it is not mere data starvation. A stronger action-conditioned
+dynamics model (or longer horizon) might narrow the gap; that the readout already saturates
+while the rollout does not is the point.
+
+## 6. Summary of findings
 
 1. **Echo-only 3D navigation works and is near-optimal for avoidance** — PPO matches a
    privileged-geometry planner to ~1 step / ~2% collision; residual failures are
@@ -196,8 +248,14 @@ binaural (two-ear) bearing cue.
 4. **A transferable RL lesson:** how you define *failure* (terminal vs non-terminal
    collision) mattered more than model sophistication for the goal task — terminal
    collision induced risk-averse hedging that no reward-weight tuning fixed.
+5. **Model-free RL beats model-based MPC on doorway-finding (0.85 vs 0.46)** because the
+   informative cue is a directional bearing signal a reactive policy follows, not an
+   action-consequence the learned latent dynamics can predict (readout R²=0.98 but
+   rollout-MAE = naive). Yet learning still helps the planner (learned-MPC 0.46 ≫
+   random-encoder 0.06), replicating the AcousticJEPA control-positive dissociation in a
+   model-based paradigm.
 
-## 6. Honest limitations (for a writeup)
+## 7. Honest limitations (for a writeup)
 - Not a scored head-to-head with Mohan & Vanderelst: different sim (2D analytic vs 3D
   rendered), different collision metric (their per-call proximity count vs our terminal/
   non-terminal). This is a conceptual replication + extension, not a rematch.
@@ -206,8 +264,12 @@ binaural (two-ear) bearing cue.
   per seed.
 - Rooms are procedural boxes with AABB pillars; no real-world geometry yet (M5 = ONNX →
   in-engine `SteamEchoNavComponent` deploy is the real-time demo path, not yet done).
+- MPC (§5) uses one horizon (H=6) and a modestly-sized world model; the learned-vs-random
+  and MPC-vs-PPO orderings are robust across 3 seeds, but the *absolute* MPC number is not
+  tuned to its ceiling. The diagnosed bottleneck (latent dynamics, not perception) is the
+  informative part.
 
-## 7. Reproduction
+## 8. Reproduction
 
 Build the server: `src/build.bat` (needs MSVC vcvars; produces `tools/episode_server.exe`).
 Verify: `python src/verify_episode_server.py`.
@@ -224,11 +286,15 @@ python echorl/oracle.py --eval-rooms 12
 # Stage-2 goal + cue ablation
 python echorl/ppo.py --task goal --nobs 0 --steps 30000 --tag full
 python echorl/ppo.py --task goal --nobs 0 --drop-coch --tag rangeonly   # etc.
+# Model-based MPC vs model-free PPO (§5): learned vs random-encoder WM, oracle ceiling
+python echorl/mpc.py --repeats 3 --train-rooms 60 --eval-rooms 12 --train-ep 360 --episodes-per 10
+python echorl/mpc.py --smoke      # fast end-to-end pipeline check
 ```
 
 Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
 `ppo_nobs{0,1,3}_full_s0_best.pt` (Stage-0 + ablations `_{nomem,rangeonly,cochonly}_s{0,1,2}`),
-`ppo_goal_nobs0_{full,rangeonly,cochonly,nomem}_s{0,1,2}_best.pt` (Stage-2).
+`ppo_goal_nobs0_{full,rangeonly,cochonly,nomem}_s{0,1,2}_best.pt` (Stage-2). `mpc.py` trains
+its world model on the fly (random-trajectory corpus), so it saves no checkpoints.
 
 Code: `src/episode_server.cpp`, `src/verify_episode_server.py`,
-`echorl/{env,vec_env,models,dqn,ppo,oracle,collect_corpus,smoke_test}.py`.
+`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,collect_corpus,smoke_test}.py`.
