@@ -101,14 +101,21 @@ def obs_to_t(obs, device):
 
 @torch.no_grad()
 def evaluate(net, seeds, device, episodes_per=6, t_max=40, sim_threads=2, nobs=3, task="avoid"):
+    """Per-ROOM macro-average: exactly `episodes_per` counted episodes for each room,
+    then averaged over rooms. NB: an earlier version counted a fixed TOTAL of episodes
+    across autoresetting envs, which OVER-SAMPLED fast-finishing rooms — and since a
+    success/collision ENDS the episode early, that biased success and collision rate
+    (goal success was inflated: rooms solved in ~1 step autoreset and flooded the sample
+    while rooms that time out barely got counted). This version caps counts per env."""
     vec = VecEchoLocEnv([[s] for s in seeds], action_mode="continuous", sim_threads=sim_threads,
                         t_max=t_max, resample_room_every=0, nobs=nobs, task=task)
-    lengths, colls, succ = [], [], []
+    room_len = [[] for _ in range(vec.n)]
+    room_coll = [[] for _ in range(vec.n)]
+    room_succ = [[] for _ in range(vec.n)]
     cur = np.zeros(vec.n)
     h = torch.zeros(1, vec.n, net.H, device=device)
     obs = vec.reset()
-    done_count = 0; target = episodes_per * vec.n
-    while done_count < target:
+    while any(len(s) < episodes_per for s in room_succ):
         f = net.feats(*obs_to_t(obs, device))
         mean, std, _v, h = net.step(f, h)
         acts = mean.clamp(-1, 1).cpu().numpy()                 # deterministic (mean) for eval
@@ -118,12 +125,14 @@ def evaluate(net, seeds, device, episodes_per=6, t_max=40, sim_threads=2, nobs=3
         h = h * (1.0 - d)
         for i in range(vec.n):
             if done[i]:
-                lengths.append(cur[i])
-                colls.append(1.0 if infos[i].get("collision") else 0.0)
-                succ.append(1.0 if infos[i].get("success") else 0.0)
-                cur[i] = 0; done_count += 1
+                if len(room_succ[i]) < episodes_per:           # only count the first N per room
+                    room_len[i].append(cur[i])
+                    room_coll[i].append(1.0 if infos[i].get("collision") else 0.0)
+                    room_succ[i].append(1.0 if infos[i].get("success") else 0.0)
+                cur[i] = 0
     vec.close()
-    return float(np.mean(lengths)), float(np.mean(colls)), float(np.mean(succ))
+    rmean = lambda rr: float(np.mean([np.mean(r) for r in rr]))  # macro-average over rooms
+    return rmean(room_len), rmean(room_coll), rmean(room_succ)
 
 
 # ---------------------------------------------------------------- training

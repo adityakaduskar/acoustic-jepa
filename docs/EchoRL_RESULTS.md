@@ -7,11 +7,14 @@ reverberant acoustics. 3D, rendered-acoustics successor to Mohan & Vanderelst 20
 
 Status as of **2026-07-21**: Stage 0 (obstacle avoidance) and Stage 2 (goal
 approach / doorway-finding) both complete, with oracle ceilings, ablations, and
-multi-seed CIs; plus a **model-based (learned-world-model CEM-MPC) vs model-free (PPO)**
-comparison on the doorway task (§5), a Δd probe diagnosing the MPC gap (§5.1), and an
-objective-mismatch result where a near-perfect cost model plans *worse* (§5.2). All numbers
-below are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the
-3000+ corpus band).
+multi-seed CIs; a **model-based (CEM-MPC) vs model-free (PPO)** comparison on the doorway
+task (§5), a Δd probe diagnosing the MPC gap (§5.1), an objective-mismatch result where a
+near-perfect cost model plans *worse* (§5.2), and a **cluttered-room showdown (§5.4)** whose
+render exposed an **evaluation bug** that had inflated the model-free numbers — corrected
+throughout, and it produces a clean **model-free/model-based crossover** (reactive PPO wins
+empty rooms; it collapses and model-based wins when the task requires planning). All numbers
+are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the 3000+
+corpus band). Trajectory maps: `results/echorl_traj_nobs{0,3}.png`.
 
 Single machine: 24 logical CPUs, CUDA GPU, torch 2.11+cu128.
 
@@ -146,7 +149,8 @@ hedges into a risk-averse local optimum (drives collision to 0 and safely wander
 clock; success collapsed 0.57→0.17). Five reward-weight iterations could not fix it.
 **Fix = non-terminal collision in goal mode** (a bump costs `w_bump=0.3` and blocks the
 move, but the episode continues to success/timeout). This unlocked reliable goal-seeking:
-success 0.40 (init) → 0.74 → 0.85 → **~0.86** by ~20k steps, reaching the door in ~12 steps.
+success 0.40 (init) → 0.74 → 0.85 → **~0.86** by ~20k steps, reaching the door in ~12 steps
+(these are the *biased* training-time evals; the fair per-room success is **~0.66**, §4.3/§5.4).
 → monostatic self-echoes *do* carry enough to home to an opening; the earlier ~0.4 ceiling
 was the reward formulation, not the cue. Reward: `w_goal=1.0, w_success=10, w_bump=0.3,
 w_dist=0.01`.
@@ -162,22 +166,26 @@ w_dist=0.01`.
 
 ### 4.3 Cue/memory ablation — what feature detects the doorway? (multi-seed, n=3)
 
-| Condition | success (mean ± 95% CI) | seeds |
-|---|---|---|
-| **Cochleagram only** (two-ear bearing) | **0.88 ± 0.06** | [0.85, 0.91, 0.89] |
-| **Full** (range + coch + memory) | **0.85 ± 0.03** | [0.86, 0.83, 0.85] |
-| **No memory** | **0.84 ± 0.07** | [0.81, 0.82, 0.88] |
-| **Range only** (no direction) | **0.79 ± 0.05** | [0.76, 0.79, 0.81] |
+Numbers below are the **corrected fair eval** (per-room macro-average; see the §5.4 box for
+why the earlier `evaluate` inflated these). The conclusion is **unchanged and sharper**.
 
-**The binaural bearing cue is the load-bearing feature.** Cochleagram-only (0.88) matches
-or edges full (0.85) — adding the range channel buys nothing — while range-only (no
-direction) is reproducibly the weakest at 0.79 (`full − range-only = +0.06`). Physical
-reading: a doorway is a *directional quiet-spot* — sound aimed at the opening escapes and
-doesn't return; the **direction** of that quiet-spot is read from the interaural level
-difference. Without bearing, the agent partly compensates by **active scanning** (turn,
-watch the omni echo drop off), which is why range-only isn't a failure. **Correction from
-single-seed:** memory does *not* clearly help even here (no-memory 0.84 ≈ full 0.85, CIs
-overlap; the single-seed ~5-point hint washed out at n=3) — consistent with Stage 0.
+| Condition | fair success (mean ± SD) | seeds | (old biased) |
+|---|---|---|---|
+| **Cochleagram only** (two-ear bearing) | **0.68 ± 0.03** | [0.67, 0.72, 0.67] | 0.88 |
+| **Full** (range + coch + memory) | **0.66 ± 0.03** | [0.67, 0.69, 0.63] | 0.85 |
+| **No memory** | **0.58 ± 0.10** | [0.49, 0.56, 0.68] | 0.84 |
+| **Range only** (no direction) | **0.48 ± 0.05** | [0.43, 0.53, 0.49] | 0.79 |
+
+**The binaural bearing cue is the load-bearing feature.** Cochleagram-only (0.68) matches
+or edges full (0.66) — adding the range channel buys nothing — while range-only (no
+direction) is reproducibly the weakest at 0.48 (`full − range-only = +0.18`, a *larger* gap
+than the biased eval showed). Physical reading: a doorway is a *directional quiet-spot* —
+sound aimed at the opening escapes and doesn't return; the **direction** of that quiet-spot
+is read from the interaural level difference. Without bearing, the agent partly compensates
+by **active scanning** (turn, watch the omni echo drop off), which is why range-only isn't a
+total failure. Under fair eval **memory now shows a modest positive effect** (no-memory 0.58
+< full 0.66, `+0.08`), reversing the earlier biased-eval read that memory didn't help
+(still noisy at ±0.10 — suggestive, not conclusive).
 
 **Contrast that carries the paper:** on obstacle avoidance every cue and architecture tied
 *exactly*; on doorway-finding they **separate**, and the one feature that matters is the
@@ -204,7 +212,7 @@ success, metric). Doorway task, nobs=0, 12 held-out rooms × 10 starts, 3 traini
 | Controller | success (mean ± SD) |
 |---|---|
 | Oracle (privileged geometry, greedy to true goal) | **1.00** (ceiling) |
-| **Model-free PPO** (`ppo.py --task goal`) | **~0.85** |
+| **Model-free PPO** (`ppo.py --task goal`) | **0.68** (fair eval; §5.4) |
 | **Learned-WM MPC** | **0.46 ± 0.05** |
 | Random-encoder MPC | **0.06 ± 0.03** (control lower bound) |
 
@@ -213,7 +221,7 @@ learned **rollout-MAE 0.60 m ≈ naive-"distance-unchanged" 0.60 m**.
 
 Two results, and the diagnostic explains both:
 
-1. **Model-free RL beats model-based latent-MPC (0.85 vs 0.46) — for a mechanistic, not a
+1. **Model-free RL beats model-based latent-MPC (0.68 vs 0.46) — for a mechanistic, not a
    tuning, reason.** The learned encoder decodes *where the goal is now* almost perfectly
    (readout R²=0.98), but the action-conditioned **latent dynamics cannot predict what an
    action does**: rolling the latent forward H steps predicts the resulting distance no
@@ -281,7 +289,7 @@ Code: `echorl/mpc_direct.py`. 12 held-out rooms × 10 starts, 3 head-training se
 | Controller | success | cost-model quality |
 |---|---|---|
 | Oracle (privileged) | 1.00 | — |
-| Model-free PPO | ~0.85 | — |
+| Model-free PPO | 0.68 (fair; §5.4) | — |
 | **Learned-WM MPC** (compositional rollout, §5) | **0.51** | rollout ≈ naive (R²≈0.24, §5.1) |
 | **Direct-outcome MPC** (the "fix") | **0.29 ± 0.02** | predicts the cost at **R² 0.96 ± 0.01** |
 
@@ -317,11 +325,60 @@ head-to-goal vs a receding-horizon planner, both with the env's exact goal-mode 
 | nobs=3 | **0.57** | **1.00** | **+0.43 → NEEDS PLANNING** (pillars block the doorway route) |
 
 So the cluttered doorway task is genuinely discriminative: reactive control caps at 0.57
-while planning reaches 1.00. This is the regime where model-based control *should* earn its
-keep, making it the decisive next test of whether the §5.2 objective-mismatch failure
-persists when planning is not just helpful but **necessary**. (Full nobs=3 four-way run —
-PPO vs learned-WM MPC vs direct-outcome MPC vs oracles — is the pending Experiment B; the
-gate authorises it.)
+while planning reaches 1.00 — the regime where model-based control *should* earn its keep.
+
+### 5.4 Experiment B (full) — the cluttered showdown, and a fixed evaluation bug
+
+Running all controllers on **nobs=3 goal** (12 held-out doorway rooms × 10 starts) forced
+a **methodology correction** that changes several earlier numbers (see box). All figures
+below use the **fixed, per-room-macro-averaged** eval.
+
+| controller (nobs=3 goal, fair eval) | success |
+|---|---|
+| planning oracle (privileged geometry) | **1.00** |
+| greedy oracle (no obstacle avoidance) | **0.54** |
+| learned-WM MPC (compositional rollout) | **0.25** |
+| direct-outcome MPC | **0.24 ± 0.04** |
+| **model-free PPO** | **0.08** |
+
+**The result reverses the naive expectation.** When the task genuinely requires planning,
+model-free PPO **collapses to 0.08** — it solves only the one trivial room whose goal is ~1
+step from the start, and fails all 11 others (the render, `results/echorl_traj_nobs3.png`,
+shows it spinning in place / looping without reaching). It is the **worst** method here,
+below both MPC variants and even the greedy oracle. Model-based control, though far from the
+privileged planning ceiling (1.00), does *better* than model-free in the regime that needs
+lookahead — the mirror image of the nobs=0 result (§5), where reactive PPO won.
+Caveat: PPO's best checkpoint was selected by the (now-known-biased) metric, which favoured
+trivial-room wins, so 0.08 may under-sell a cleanly-retrained PPO; but the biased 0.82 it
+originally reported was an artifact, not a real score.
+
+> **⚠ Evaluation bug found & fixed (affects earlier PPO numbers).** `ppo.evaluate` ran one
+> env per room with autoreset and counted a fixed *total* of episodes. Because reaching the
+> goal (or colliding) *ends an episode early*, rooms solved in ~1 step autoreset and flooded
+> the sample while rooms that time out were barely counted → **goal success was inflated**.
+> Corrected to a per-room macro-average (fixed episodes each). Impact (nobs=0 goal, seed 0):
+> **PPO 0.86 → 0.68**; nobs=3 goal: **0.82 → 0.08**. The **MPC and oracle numbers are
+> unaffected** (they always used fixed-episodes-per-room), so §5/§5.1/§5.2 conclusions hold
+> with PPO's number lowered from ~0.85 to **0.68** (still > learned-WM MPC 0.51 > direct
+> 0.29 at nobs=0). §4.3's cue-ablation ordering is **unchanged and sharper** under fair eval
+> (below). Stage-0 avoidance used the same eval but the bias runs the *other* way there
+> (collisions end episodes early → collision rate over-, flight-length under-estimated), so
+> PPO avoidance is if anything *better* than the reported 37/8% — a clean recompute is a
+> flagged follow-up.
+
+Corrected **§4.3 Stage-2 cue ablation** (fair eval, nobs=0, n=3 seeds):
+
+| condition | fair success | (old biased) |
+|---|---|---|
+| cochleagram-only (bearing) | **0.68 ± 0.03** | 0.88 |
+| full | **0.66 ± 0.03** | 0.85 |
+| no-memory | **0.58 ± 0.10** | 0.84 |
+| range-only (no bearing) | **0.48 ± 0.05** | 0.79 |
+
+The **binaural-bearing conclusion is stronger, not weaker**: coch-only ≈ full ≫ range-only,
+now with `full − range-only = +0.18` (was +0.06). And memory now shows a modest positive
+effect (`full − no-memory = +0.08`, was ~0), overturning the earlier "memory doesn't help"
+read for the goal task (still noisy at ±0.10).
 
 ## 6. Summary of findings
 
@@ -332,17 +389,19 @@ gate authorises it.)
    sophistication: discrete fixed-speed DQN floors on clutter (~3/100%); continuous PPO
    solves it (37/8%). Memory and cue choice are irrelevant here — the task is saturated.
 3. **The harder goal task exposes cue importance.** Doorway-finding depends on the
-   **binaural bearing cue** (cochleagram ≈ full ≫ range-only), exactly as the acoustics
-   predict; memory still doesn't clearly help.
+   **binaural bearing cue** (cochleagram 0.68 ≈ full 0.66 ≫ range-only 0.48, fair eval),
+   exactly as the acoustics predict; under fair eval memory shows a modest positive effect.
 4. **A transferable RL lesson:** how you define *failure* (terminal vs non-terminal
    collision) mattered more than model sophistication for the goal task — terminal
    collision induced risk-averse hedging that no reward-weight tuning fixed.
-5. **Model-free RL beats model-based MPC on doorway-finding (0.85 vs 0.46)** because the
-   informative cue is a directional bearing signal a reactive policy follows, not an
-   action-consequence the learned latent dynamics can predict (readout R²=0.98 but
-   rollout-MAE = naive). Yet learning still helps the planner (learned-MPC 0.46 ≫
-   random-encoder 0.06), replicating the AcousticJEPA control-positive dissociation in a
-   model-based paradigm.
+5. **Which paradigm wins depends on whether the task needs planning — a clean crossover.**
+   On *empty* doorway rooms (reactive-sufficient) model-free PPO wins (0.68 vs learned-MPC
+   0.46), because the cue is a directional bearing signal a reactive policy follows, not an
+   action-consequence the latent dynamics can predict. On *cluttered* rooms that **require**
+   lookahead (planning oracle 1.00 vs greedy 0.54), PPO **collapses to 0.08** — the worst
+   method, below both MPCs (0.24–0.25) — while model-based control degrades more gracefully
+   (§5.4). Yet learning still helps the planner throughout (learned-MPC ≫ random-encoder
+   0.06), replicating the AcousticJEPA control-positive dissociation in a model-based paradigm.
 6. **A better cost-model made a worse controller — objective mismatch (§5.2).** Swapping the
    compositional latent rollout for a direct outcome head that predicts the planning cost at
    R²=0.96 (vs ≈0.24) *halved* MPC success (0.29 vs 0.51), everything else fixed. CEM
@@ -354,6 +413,11 @@ gate authorises it.)
    R²=0.43) and kept by the encoder (z+a R²=0.42), but the trained predictor path throws it
    away (0.24). Even so, the single-ping ceiling (0.43) is low — the cue is intrinsically
    myopic, favouring reactive control.
+8. **An evaluation bug inflated the model-free numbers (§5.4).** Counting a fixed total of
+   episodes across autoresetting per-room envs over-samples fast-finishing (early-success)
+   rooms; corrected to a per-room macro-average. PPO goal success fell 0.86→0.68 (nobs=0) and
+   0.82→0.08 (nobs=3). MPC/oracle numbers were never affected (fixed episodes per room). The
+   render figures — which drove the discovery — were per-episode-correct throughout.
 
 ## 7. Honest limitations (for a writeup)
 - Not a scored head-to-head with Mohan & Vanderelst: different sim (2D analytic vs 3D
@@ -396,6 +460,13 @@ python echorl/mpc.py --train-rooms 60 --train-ep 360 --skip-eval \
 python echorl/probe_dd.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt
 # Exp C (§5.2) -- informed rematch (direct outcome head; objective-mismatch result):
 python echorl/mpc_direct.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --seeds 3
+# Exp B (§5.3 gate / §5.4 showdown): planning-needed check + cluttered nobs=3 run
+python echorl/gate_b.py
+python echorl/mpc.py --nobs 3 --train-ep 360 --skip-eval --corpus-out echorl/corpus_goal_nobs3.pkl --save-wm echorl/ckpt/mpc_wm_nobs3.pt
+python echorl/mpc_direct.py --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --nobs 3 --seeds 3
+# Trajectory maps (§5.4):
+python echorl/render_traj.py --nobs 0 --ppo-ckpt echorl/ckpt/ppo_goal_nobs0_full_s0_best.pt --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --out results/echorl_traj_nobs0.png
+python echorl/render_traj.py --nobs 3 --ppo-ckpt echorl/ckpt/ppo_goal_nobs3_showdown_s0_best.pt --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --out results/echorl_traj_nobs3.png
 ```
 
 Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
@@ -404,4 +475,4 @@ Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
 its world model on the fly (random-trajectory corpus), so it saves no checkpoints.
 
 Code: `src/episode_server.cpp`, `src/verify_episode_server.py`,
-`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,mpc_direct,probe_dd,collect_corpus,smoke_test}.py`.
+`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,mpc_direct,probe_dd,gate_b,render_traj,collect_corpus,smoke_test}.py`.
