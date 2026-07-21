@@ -139,6 +139,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", required=True)
     ap.add_argument("--wm", required=True)
+    ap.add_argument("--nobs", type=int, default=0, help="obstacle count of the corpus/WM/eval rooms")
     ap.add_argument("--H", type=int, default=6)
     ap.add_argument("--eval-rooms", type=int, default=12)
     ap.add_argument("--episodes-per", type=int, default=10)
@@ -151,36 +152,35 @@ def main():
     wm = WorldModel().to(dev); wm.load_state_dict(ck["model"]); wm.eval()
     for p in wm.parameters():
         p.requires_grad_(False)
-    eval_seeds = opening_seeds(600, args.eval_rooms, 0)
-    print(f"device={dev} | Exp C (direct-outcome MPC) | H={args.H} | {len(eval_seeds)} held-out rooms "
-          f"x {args.episodes_per} starts | {len(eps)} corpus episodes")
+    eval_seeds = opening_seeds(600, args.eval_rooms, args.nobs)
+    print(f"device={dev} | Exp C (direct-outcome MPC) | nobs={args.nobs} | H={args.H} | "
+          f"{len(eval_seeds)} held-out rooms x {args.episodes_per} starts | {len(eps)} corpus episodes")
 
     t0 = time.time()
-    # baselines (seed-independent): oracle + the 5 learned-WM MPC, same harness
+    # baselines (seed-independent): greedy oracle + the §5 learned-WM MPC, same harness
     orc = eval_policy(lambda o, i: oracle_action(*i["pose"], i["goal"]), eval_seeds, dev,
-                      episodes_per=args.episodes_per)
+                      episodes_per=args.episodes_per, nobs=args.nobs)
     def learned_plan(o, i):
         z = wm.enc(torch.as_tensor(o["range"][None], device=dev), torch.as_tensor(o["coch"][None], device=dev))
         return cem_plan(wm, z, args.H, dev)
-    lrn = eval_policy(learned_plan, eval_seeds, dev, episodes_per=args.episodes_per)
-    print(f"oracle {orc:.2f} | learned-WM MPC (compositional rollout) {lrn:.2f}  ({time.time()-t0:.0f}s)")
+    lrn = eval_policy(learned_plan, eval_seeds, dev, episodes_per=args.episodes_per, nobs=args.nobs)
+    print(f"greedy-oracle {orc:.2f} | learned-WM MPC (compositional rollout) {lrn:.2f}  ({time.time()-t0:.0f}s)")
 
-    # the fix: direct-outcome MPC, multi-seed
+    # the direct-outcome controller, multi-seed
     direct_sr, head_r2 = [], []
     for s in range(args.seeds):
         g = train_outcome_head(wm, eps, dev, H=args.H, seed=s)
         def direct_plan(o, i, g=g):
             z = wm.enc(torch.as_tensor(o["range"][None], device=dev), torch.as_tensor(o["coch"][None], device=dev))
             return cem_outcome_plan(g, z, args.H, dev)
-        sr = eval_policy(direct_plan, eval_seeds, dev, episodes_per=args.episodes_per)
+        sr = eval_policy(direct_plan, eval_seeds, dev, episodes_per=args.episodes_per, nobs=args.nobs)
         direct_sr.append(sr); head_r2.append(g.val_r2)
         print(f"[seed {s}] outcome-head cumulative-dist R2 {g.val_r2:+.2f} | direct-outcome MPC success {sr:.2f}")
 
     dm = float(np.mean(direct_sr)); dsd = float(np.std(direct_sr, ddof=1) if len(direct_sr) > 1 else 0.0)
-    print(f"\n=== Exp C: informed MPC rematch (doorway, nobs=0, {len(eval_seeds)}x{args.episodes_per}) ===")
-    print(f"  oracle (privileged)        {orc:.2f}   (ceiling)")
-    print(f"  model-free PPO             ~0.85")
-    print(f"  direct-outcome MPC (FIX)   {dm:.2f} +/- {dsd:.2f}   [outcome-head cumulative-dist R2 {np.mean(head_r2):+.2f}]")
+    print(f"\n=== Exp C: direct-outcome MPC (doorway, nobs={args.nobs}, {len(eval_seeds)}x{args.episodes_per}) ===")
+    print(f"  greedy oracle (no avoid)   {orc:.2f}")
+    print(f"  direct-outcome MPC         {dm:.2f} +/- {dsd:.2f}   [outcome-head cumulative-dist R2 {np.mean(head_r2):+.2f}]")
     print(f"  learned-WM MPC (§5)        {lrn:.2f}   (compositional rollout)")
     print(f"total {time.time()-t0:.0f}s")
 
