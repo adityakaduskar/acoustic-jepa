@@ -9,10 +9,11 @@ Status as of **2026-07-21**: Stage 0 (obstacle avoidance) and Stage 2 (goal
 approach / doorway-finding) both complete, with oracle ceilings, ablations, and
 multi-seed CIs; a **model-based (CEM-MPC) vs model-free (PPO)** comparison on the doorway
 task (§5), a Δd probe diagnosing the MPC gap (§5.1), an objective-mismatch result where a
-near-perfect cost model plans *worse* (§5.2), and a **cluttered-room showdown (§5.4)** whose
+near-perfect cost model plans *worse* (§5.2), a **cluttered-room showdown (§5.4)** whose
 render exposed an **evaluation bug** that had inflated the model-free numbers — corrected
-throughout, and it produces a clean **model-free/model-based crossover** (reactive PPO wins
-empty rooms; it collapses and model-based wins when the task requires planning). All numbers
+throughout, producing a clean **model-free/model-based crossover** (reactive PPO wins empty
+rooms; it collapses and model-based wins when the task requires planning) — and an honest
+**negative (§5.5)**: the named on-policy (DAgger) fix does not rescue the planner. All numbers
 are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the 3000+
 corpus band). Trajectory maps: `results/echorl_traj_nobs{0,3}.png`.
 
@@ -339,18 +340,22 @@ below use the **fixed, per-room-macro-averaged** eval.
 | greedy oracle (no obstacle avoidance) | **0.54** |
 | learned-WM MPC (compositional rollout) | **0.25** |
 | direct-outcome MPC | **0.24 ± 0.04** |
-| **model-free PPO** | **0.08** |
+| **model-free PPO** | **0.08–0.18** |
 
 **The result reverses the naive expectation.** When the task genuinely requires planning,
-model-free PPO **collapses to 0.08** — it solves only the one trivial room whose goal is ~1
-step from the start, and fails all 11 others (the render, `results/echorl_traj_nobs3.png`,
+model-free PPO **collapses** — it essentially solves only the one trivial room whose goal is
+~1 step from the start, and fails the rest (the render, `results/echorl_traj_nobs3.png`,
 shows it spinning in place / looping without reaching). It is the **worst** method here,
 below both MPC variants and even the greedy oracle. Model-based control, though far from the
 privileged planning ceiling (1.00), does *better* than model-free in the regime that needs
 lookahead — the mirror image of the nobs=0 result (§5), where reactive PPO won.
-Caveat: PPO's best checkpoint was selected by the (now-known-biased) metric, which favoured
-trivial-room wins, so 0.08 may under-sell a cleanly-retrained PPO; but the biased 0.82 it
-originally reported was an artifact, not a real score.
+**Checkpoint-selection control (added):** retraining PPO with the *fixed* eval driving
+best-checkpoint selection (`tag=showdown2`) gives a best checkpoint of **0.18** (early
+training) that then **collapses to 0.08** and stays there (value loss → 0.02, a degenerate
+low-entropy policy). So the generous best-checkpoint number is 0.18 and the converged number
+is 0.08 — either way worst-tier, below the MPCs' 0.24–0.25. My earlier caveat that "0.08 may
+under-sell a cleanly-retrained PPO" is thus **largely refuted**: fair selection recovers only
+to 0.18, and the policy does not hold even that.
 
 > **⚠ Evaluation bug found & fixed (affects earlier PPO numbers).** `ppo.evaluate` ran one
 > env per room with autoreset and counted a fixed *total* of episodes. Because reaching the
@@ -380,6 +385,37 @@ now with `full − range-only = +0.18` (was +0.06). And memory now shows a modes
 effect (`full − no-memory = +0.08`, was ~0), overturning the earlier "memory doesn't help"
 read for the goal task (still noisy at ±0.10).
 
+### 5.5 Experiment D — does on-policy data fix the objective mismatch? (it doesn't)
+
+§5.2 diagnosed the direct-outcome MPC's failure as the planner exploiting its model
+*off the random-training distribution*, and named the indicated fix: **DAgger** — let the
+model see the deliberate, goal-directed trajectories the planner actually produces. Round 0
+trains the outcome head on the random corpus; each later round runs the current MPC, logs its
+own trajectories, adds them to the training set, and retrains the head (frozen encoder
+throughout). Code: `echorl/mpc_dagger.py`. nobs=0, 12 held-out rooms × 10 starts, **3 seeds**:
+
+| seed | round 0 | 1 | 2 | 3 | 4 | net |
+|---|---|---|---|---|---|---|
+| 0 | 0.28 | 0.22 | 0.17 | 0.19 | 0.42 | +0.14 |
+| 1 | 0.30 | 0.23 | 0.39 | 0.23 | 0.33 | +0.03 |
+| 2 | 0.32 | 0.29 | 0.38 | 0.29 | 0.33 | +0.01 |
+
+**Honest negative: on-policy aggregation does *not* reliably rescue the planner.** Round-0
+mean 0.30 ± 0.02 → final 0.36 ± 0.05; the success bounces in 0.17–0.42 with **no monotonic
+trend** and no consistent per-round pattern (the +0.14 in seed 0 was a lucky final draw —
+seeds 1–2 show ~0). The head's held-out accuracy stays high (R² 0.91–0.96) throughout, so the
+model isn't degrading; adding its own data just doesn't move control. The direct-outcome MPC
+**stays stuck ~0.30–0.36, still below the compositional learned-WM MPC's 0.51** (§5.2).
+
+So the §5.2 story sharpens: the failure is **not** a pure distribution-shift problem that
+cheap on-policy data cures. It is the **planner–model interaction hitting the myopic-cue
+ceiling** (§5.1: single-ping Δd caps at R²≈0.43) — CEM keeps finding actions the head scores
+well but that don't reach, and better-covered data doesn't remove that exploit. The practical
+lesson stands but is stronger: on this echo-navigation task you cannot cheaply plan your way
+past a reactive policy; the fixes that would matter are a less-exploitable planner
+(trust-region / uncertainty-penalised CEM) or a fundamentally less myopic observation, not
+more data. (Refuting one's own proposed fix, across seeds, is the point of running it.)
+
 ## 6. Summary of findings
 
 1. **Echo-only 3D navigation works and is near-optimal for avoidance** — PPO matches a
@@ -398,17 +434,19 @@ read for the goal task (still noisy at ±0.10).
    On *empty* doorway rooms (reactive-sufficient) model-free PPO wins (0.68 vs learned-MPC
    0.46), because the cue is a directional bearing signal a reactive policy follows, not an
    action-consequence the latent dynamics can predict. On *cluttered* rooms that **require**
-   lookahead (planning oracle 1.00 vs greedy 0.54), PPO **collapses to 0.08** — the worst
+   lookahead (planning oracle 1.00 vs greedy 0.54), PPO **collapses to 0.08–0.18** — the worst
    method, below both MPCs (0.24–0.25) — while model-based control degrades more gracefully
    (§5.4). Yet learning still helps the planner throughout (learned-MPC ≫ random-encoder
    0.06), replicating the AcousticJEPA control-positive dissociation in a model-based paradigm.
-6. **A better cost-model made a worse controller — objective mismatch (§5.2).** Swapping the
-   compositional latent rollout for a direct outcome head that predicts the planning cost at
-   R²=0.96 (vs ≈0.24) *halved* MPC success (0.29 vs 0.51), everything else fixed. CEM
-   exploits the accurate-but-high-capacity model off the training distribution; the
-   inaccurate-but-smooth rollout is less exploitable. The MPC bottleneck is the
-   planner–model interaction under distribution shift, not model accuracy — so the fix is
-   on-policy/conservative planning, not a better forward model.
+6. **A better cost-model made a worse controller — objective mismatch (§5.2), and on-policy
+   data doesn't fix it (§5.5).** Swapping the compositional latent rollout for a direct
+   outcome head that predicts the planning cost at R²=0.96 (vs ≈0.24) *halved* MPC success
+   (0.29 vs 0.51), everything else fixed — CEM exploits the accurate high-capacity model off
+   the training distribution. The named fix, DAgger (aggregate the planner's own
+   trajectories), was tested over 3 seeds and **failed to reliably help** (0.30→0.36, within
+   noise, no trend). So the limit is not pure distribution shift but the planner–model
+   exploit hitting the myopic-cue ceiling (§5.1); the real fixes are a less-exploitable
+   planner or a less myopic observation, not more data or a more accurate model.
 7. **Probe diagnosis (§5.1):** the action-consequence info is in a single ping (raw+a
    R²=0.43) and kept by the encoder (z+a R²=0.42), but the trained predictor path throws it
    away (0.24). Even so, the single-ping ceiling (0.43) is low — the cue is intrinsically
@@ -464,6 +502,8 @@ python echorl/mpc_direct.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc
 python echorl/gate_b.py
 python echorl/mpc.py --nobs 3 --train-ep 360 --skip-eval --corpus-out echorl/corpus_goal_nobs3.pkl --save-wm echorl/ckpt/mpc_wm_nobs3.pt
 python echorl/mpc_direct.py --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --nobs 3 --seeds 3
+# Exp D (§5.5): does on-policy (DAgger) data fix the direct-outcome MPC? (negative)
+python echorl/mpc_dagger.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --nobs 0 --rounds 4 --seed 0
 # Trajectory maps (§5.4):
 python echorl/render_traj.py --nobs 0 --ppo-ckpt echorl/ckpt/ppo_goal_nobs0_full_s0_best.pt --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --out results/echorl_traj_nobs0.png
 python echorl/render_traj.py --nobs 3 --ppo-ckpt echorl/ckpt/ppo_goal_nobs3_showdown_s0_best.pt --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --out results/echorl_traj_nobs3.png
@@ -475,4 +515,4 @@ Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
 its world model on the fly (random-trajectory corpus), so it saves no checkpoints.
 
 Code: `src/episode_server.cpp`, `src/verify_episode_server.py`,
-`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,mpc_direct,probe_dd,gate_b,render_traj,collect_corpus,smoke_test}.py`.
+`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,mpc_direct,mpc_dagger,probe_dd,gate_b,render_traj,collect_corpus,smoke_test}.py`.
