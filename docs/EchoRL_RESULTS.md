@@ -15,7 +15,8 @@ throughout, producing a clean **model-free/model-based crossover** (reactive PPO
 rooms; it collapses and model-based wins when the task requires planning) — and an honest
 **negative (§5.5)**: the named on-policy (DAgger) fix does not rescue the planner. All numbers
 are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the 3000+
-corpus band). Trajectory maps: `results/echorl_traj_nobs{0,3}.png`.
+corpus band). Trajectory maps for every condition: `results/echorl_{avoid,goal}_nobs{0,3}.png`
+(task × clutter; columns = controllers, green = success, red = failure).
 
 Single machine: 24 logical CPUs, CUDA GPU, torch 2.11+cu128.
 
@@ -106,12 +107,17 @@ confirmed — continuous control (slow/stop/pivot) cracks the clutter:**
 
 | tier | random | DQN (best) | **PPO (best)** |
 |---|---|---|---|
-| nobs=0 | 4.4 / 100% | 30.8 / 26% | **40.0 / 0%** |
+| nobs=0 | 4.4 / 100% | 30.8 / 26% | **39.4 / 2%** |
 | nobs=1 | 3.9 / 100% | 9.0 / 88% | **40.0 / 0%** |
-| nobs=3 | 2.7 / 100% | ~3 / 100% | **37.0 / 8%** |
+| nobs=3 | 2.7 / 100% | ~3 / 100% | **38.4 / 4%** |
 
 PPO reached optimum in <10k env steps (vs DQN ~21k + oscillation), rock-stable
-(nobs=3 held 37.0 for 90k steps, value loss ~0.04).
+(nobs=3 held for 90k steps, value loss ~0.04). **Numbers are the corrected fair eval
+(per-room macro-average).** The evaluation bug (§5.4) applied here too, but with the
+*opposite* sign: on avoidance a **collision** ends an episode early, so the biased eval
+*over*-sampled crash-prone rooms and thus **over-stated collisions / under-stated flight
+length** — the mirror of the goal-task inflation. Recount: nobs=3 went **37.0 / 8% →
+38.4 / 4%** (better, as predicted); nobs=0 40.0/0% → 39.4/2%. Conclusions unchanged.
 
 ### 3.3 Oracle ceiling — `echorl/oracle.py`
 Privileged-geometry receding-horizon planner (vectorized random-shooting over true
@@ -122,11 +128,12 @@ residual nobs=3 collisions are **genuinely unsurvivable rooms** (the planner als
 avoidance fails under the 45°/step turn limit, so the ceiling requires planning.
 
 ### 3.4 Ablations (nobs=3) — do memory / cue choice matter?
-`full` = `no-memory` = `range-only` = `cochleagram-only` = **37.0 / 8%, all identical,
-all at the oracle ceiling.** → **continuous action is the sole decisive factor**; memory
-is not needed (near-Markov given the observation) and either echo representation alone
-suffices. Stage-0 avoidance is **saturated / low-order** (mirrors the JEPA RESULTS.md
-"geometry is low-order, already exposed" finding).
+`full` = `no-memory` = `range-only` = `cochleagram-only` = **38.4 / 4% (fair eval),
+all identical (±0.0 len over 3 seeds), all at the oracle ceiling.** → **continuous action
+is the sole decisive factor**; memory is not needed (near-Markov given the observation) and
+either echo representation alone suffices. Stage-0 avoidance is **saturated / low-order**
+(mirrors the JEPA RESULTS.md "geometry is low-order, already exposed" finding). The tie is
+exact under fair eval too, so the finding is robust to the §5.4 correction.
 
 ### 3.5 Multi-seed CIs (nobs=3, 3 seeds/config)
 `full`, `no-memory`, `range-only` each **36.1 ± 0.0 len / 0.10 ± 0.00 collision** — every
@@ -344,7 +351,7 @@ below use the **fixed, per-room-macro-averaged** eval.
 
 **The result reverses the naive expectation.** When the task genuinely requires planning,
 model-free PPO **collapses** — it essentially solves only the one trivial room whose goal is
-~1 step from the start, and fails the rest (the render, `results/echorl_traj_nobs3.png`,
+~1 step from the start, and fails the rest (the render, `results/echorl_goal_nobs3.png`,
 shows it spinning in place / looping without reaching). It is the **worst** method here,
 below both MPC variants and even the greedy oracle. Model-based control, though far from the
 privileged planning ceiling (1.00), does *better* than model-free in the regime that needs
@@ -368,8 +375,8 @@ to 0.18, and the policy does not hold even that.
 > 0.29 at nobs=0). §4.3's cue-ablation ordering is **unchanged and sharper** under fair eval
 > (below). Stage-0 avoidance used the same eval but the bias runs the *other* way there
 > (collisions end episodes early → collision rate over-, flight-length under-estimated), so
-> PPO avoidance is if anything *better* than the reported 37/8% — a clean recompute is a
-> flagged follow-up.
+> PPO avoidance is *better* than the old numbers: recount done (§3), nobs=3 **37.0/8% →
+> 38.4/4%**, cue-ablation tie still exact — conclusions unchanged.
 
 Corrected **§4.3 Stage-2 cue ablation** (fair eval, nobs=0, n=3 seeds):
 
@@ -423,7 +430,8 @@ more data. (Refuting one's own proposed fix, across seeds, is the point of runni
    genuinely unsurvivable rooms.
 2. **Continuous control is the decisive factor for cluttered avoidance**, not perception
    sophistication: discrete fixed-speed DQN floors on clutter (~3/100%); continuous PPO
-   solves it (37/8%). Memory and cue choice are irrelevant here — the task is saturated.
+   solves it (38.4/4%, fair eval). Memory and cue choice are irrelevant here — the task is
+   saturated (all cue/memory ablations tie exactly).
 3. **The harder goal task exposes cue importance.** Doorway-finding depends on the
    **binaural bearing cue** (cochleagram 0.68 ≈ full 0.66 ≫ range-only 0.48, fair eval),
    exactly as the acoustics predict; under fair eval memory shows a modest positive effect.
@@ -452,10 +460,13 @@ more data. (Refuting one's own proposed fix, across seeds, is the point of runni
    away (0.24). Even so, the single-ping ceiling (0.43) is low — the cue is intrinsically
    myopic, favouring reactive control.
 8. **An evaluation bug inflated the model-free numbers (§5.4).** Counting a fixed total of
-   episodes across autoresetting per-room envs over-samples fast-finishing (early-success)
-   rooms; corrected to a per-room macro-average. PPO goal success fell 0.86→0.68 (nobs=0) and
-   0.82→0.08 (nobs=3). MPC/oracle numbers were never affected (fixed episodes per room). The
-   render figures — which drove the discovery — were per-episode-correct throughout.
+   episodes across autoresetting per-room envs over-samples fast-finishing (early-*terminating*)
+   rooms; corrected to a per-room macro-average. On the goal task success *ends* an episode so
+   it was **inflated** (PPO 0.86→0.68 nobs=0, 0.82→0.08 nobs=3); on avoidance a *collision*
+   ends an episode so it ran the other way and *understated* PPO (nobs=3 37/8%→38.4/4%). All
+   numbers recomputed; every qualitative conclusion held. MPC/oracle numbers were never
+   affected (fixed episodes per room), and the render figures were per-episode-correct
+   throughout — the nobs=3 render is what exposed the bug.
 
 ## 7. Honest limitations (for a writeup)
 - Not a scored head-to-head with Mohan & Vanderelst: different sim (2D analytic vs 3D
@@ -504,9 +515,11 @@ python echorl/mpc.py --nobs 3 --train-ep 360 --skip-eval --corpus-out echorl/cor
 python echorl/mpc_direct.py --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --nobs 3 --seeds 3
 # Exp D (§5.5): does on-policy (DAgger) data fix the direct-outcome MPC? (negative)
 python echorl/mpc_dagger.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --nobs 0 --rounds 4 --seed 0
-# Trajectory maps (§5.4):
-python echorl/render_traj.py --nobs 0 --ppo-ckpt echorl/ckpt/ppo_goal_nobs0_full_s0_best.pt --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --out results/echorl_traj_nobs0.png
-python echorl/render_traj.py --nobs 3 --ppo-ckpt echorl/ckpt/ppo_goal_nobs3_showdown_s0_best.pt --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --out results/echorl_traj_nobs3.png
+# Trajectory maps -- all 4 conditions (task x clutter), columns = controllers:
+python echorl/render_traj.py --task avoid --nobs 0 --dqn-ckpt echorl/ckpt/dqn_stage0_nobs0_best.pt --ppo-ckpt echorl/ckpt/ppo_stage0_nobs0_best.pt --out results/echorl_avoid_nobs0.png
+python echorl/render_traj.py --task avoid --nobs 3 --dqn-ckpt echorl/ckpt/dqn_stage0_nobs1_best.pt --ppo-ckpt echorl/ckpt/ppo_stage0_nobs3_best.pt --out results/echorl_avoid_nobs3.png
+python echorl/render_traj.py --task goal  --nobs 0 --ppo-ckpt echorl/ckpt/ppo_goal_nobs0_full_s0_best.pt --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --out results/echorl_goal_nobs0.png
+python echorl/render_traj.py --task goal  --nobs 3 --ppo-ckpt echorl/ckpt/ppo_goal_nobs3_showdown2_s0_best.pt --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --out results/echorl_goal_nobs3.png
 ```
 
 Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
