@@ -135,6 +135,31 @@ either echo representation alone suffices. Stage-0 avoidance is **saturated / lo
 (mirrors the JEPA RESULTS.md "geometry is low-order, already exposed" finding). The tie is
 exact under fair eval too, so the finding is robust to the §5.4 correction.
 
+### 3.4.1 ⚠ Caveat: PPO "solves" avoidance by STOPPING (found via the render)
+The trajectory maps (`results/echorl_avoid_nobs{0,3}.png`) show PPO's paths as tiny stubs —
+the agent **hardly moves**. This is faithful, not a render bug: tracing the emitted actions,
+PPO's mean forward step is **0.03 m (nobs=0) / 0.004 m (nobs=3)** out of a 1.5 m max — it
+drifts for a few steps, finds open space, then **parks and only rotates** for the rest of the
+episode. The reward explains it: per step ≈ `alive 0.05 + clearance≤0.15 + 0.02·dstep`, while
+a crash is −5 and terminal — so *stop in open space* dominates (guaranteed ~0.20/step, zero
+risk) and PPO converges to it. "Flight length" counts *steps survived*, and a parked agent
+survives all 40, so **38.4/40 = "it stopped and nothing hit it."**
+
+Consequences for how to read §3:
+- It **deepens the saturation explanation**: the ablations tie not because the cues are
+  redundant but because **the winning policy barely uses perception at all** ("stop" is
+  nearly a constant action).
+- It **sharpens the DQN-vs-PPO story**: the decisive advantage of continuous control is the
+  ability to **brake**, not skilled weaving — the fixed-speed DQN (0.75 m every step) *cannot
+  stop*, so in clutter it is forced to keep moving and eventually collides. True, but humbler
+  than "PPO flies better."
+- It is a **limitation of the avoidance task design** (the reward is winnable by not moving),
+  not a property of echo-navigation. A task that forces sustained travel (patrol / coverage,
+  or a hard per-step move requirement) would be needed to test *skilled* echo-guided flight.
+- The **goal task has no such degeneracy** (stopping fails; the agent must travel to the
+  doorway), which is why the cues there actually separate (§4.3) — PPO's goal-task forward
+  step is ~1.39 m, i.e. it moves purposefully.
+
 ### 3.5 Multi-seed CIs (nobs=3, 3 seeds/config)
 `full`, `no-memory`, `range-only` each **36.1 ± 0.0 len / 0.10 ± 0.00 collision** — every
 one of the 9 runs returned *exactly* 36.1/0.10. Fully seed-robust. (Zero variance also
@@ -425,13 +450,15 @@ more data. (Refuting one's own proposed fix, across seeds, is the point of runni
 
 ## 6. Summary of findings
 
-1. **Echo-only 3D navigation works and is near-optimal for avoidance** — PPO matches a
-   privileged-geometry planner to ~1 step / ~2% collision; residual failures are
-   genuinely unsurvivable rooms.
-2. **Continuous control is the decisive factor for cluttered avoidance**, not perception
-   sophistication: discrete fixed-speed DQN floors on clutter (~3/100%); continuous PPO
-   solves it (38.4/4%, fair eval). Memory and cue choice are irrelevant here — the task is
-   saturated (all cue/memory ablations tie exactly).
+1. **Echo-only avoidance is "solved," but degenerately — PPO learns to STOP** (§3.4.1). It
+   matches the privileged planner on the survival metric (~38/40), but by parking in open
+   space (mean forward step 0.004–0.03 m of 1.5), not by skilled flight — the avoidance
+   reward is winnable without moving. Faithful in the renders; caught *by* the renders.
+2. **Continuous control is the decisive factor for cluttered avoidance** — but the mechanism
+   is **braking**, not weaving: discrete fixed-speed DQN *cannot stop* so it floors on clutter
+   (~3/100%); continuous PPO can stop and survives (38.4/4%). Memory and cue choice are
+   irrelevant because the winning policy (stop in open space) barely needs perception — which
+   is the real reason all ablations tie exactly.
 3. **The harder goal task exposes cue importance.** Doorway-finding depends on the
    **binaural bearing cue** (cochleagram 0.68 ≈ full 0.66 ≫ range-only 0.48, fair eval),
    exactly as the acoustics predict; under fair eval memory shows a modest positive effect.
