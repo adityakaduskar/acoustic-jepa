@@ -162,9 +162,30 @@ Consequences for how to read §3:
 
 ### 3.5 Multi-seed CIs (nobs=3, 3 seeds/config)
 `full`, `no-memory`, `range-only` each **36.1 ± 0.0 len / 0.10 ± 0.00 collision** — every
-one of the 9 runs returned *exactly* 36.1/0.10. Fully seed-robust. (Zero variance also
-reflects a deterministic eval on fixed held-out rooms/starts; a fuller CI would randomize
-eval starts per seed, but the training-seed robustness is total.)
+one of the 9 runs returned *exactly* 36.1/0.10. Fully seed-robust. (These are the *old
+biased-eval* numbers; the fair recount is 38.4/0.04, §3.2/§3.4. Zero variance also reflects a
+deterministic eval on fixed held-out rooms/starts.)
+
+### 3.6 Redesigned avoidance: the COVERAGE task (kills the parking exploit)
+§3.4.1 showed the survive-only reward is winnable by stopping. The **explore** task
+(`env.py task="explore"`) fixes this: the room is a 1 m coverage grid, and reward = **+1 per
+newly-visited cell − 0.03 per step (time cost) + small clearance term**, with **terminal
+collision** (−5). Parking now earns a *strictly negative* return (only the time cost), so the
+agent must **keep moving into new ground while not crashing** — movement is forced and
+perception is needed to route. Metric: **cells covered** (macro-avg over held-out rooms) in a
+60-step episode. Best-checkpoint by coverage.
+
+Empty rooms (nobs=0), PPO training curve (`results/echorl_explore_nobs0.png`):
+- Init (random) covers 3.8 cells, crashes 100%.
+- It **first relapses to parking** (cov 1.4–3.0, survives 60/60) — the §3.4.1 attractor is
+  real and found first.
+- Then the coverage reward pulls it out: cov climbs to **15.4** at 4% collision. The agent
+  now **sweeps the room** (the render is unambiguous: old avoid-PPO = tiny stubs; new
+  coverage-PPO = big space-filling loops), covering ~15× more ground than parking.
+
+So the redesign works: the winning policy is now *skilled sustained flight*, not stopping.
+(Cluttered nobs=3 coverage + whether the cue ablations finally separate on a task that
+actually requires perception — the interesting follow-on — is in progress.)
 
 ---
 

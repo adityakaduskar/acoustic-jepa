@@ -88,14 +88,18 @@ def make_controllers(task, args, dev):
         if args.corpus and wm is not None:
             g = train_outcome_head(wm, load_corpus(args.corpus), dev, H=args.H, seed=0)
             ctrls["direct-outcome MPC"] = ("direct", (wm, g))
-    else:  # avoid
+    else:  # avoid or explore
         if args.dqn_ckpt:
             q = DuelingQNet().to(dev); q.load_state_dict(torch.load(args.dqn_ckpt, map_location=dev)["model"]); q.eval()
             ctrls[args.dqn_label] = ("dqn", q)
+        if args.ppo2_ckpt:                                    # optional 2nd PPO (e.g. old avoid agent)
+            net2 = RecurrentAC().to(dev); net2.load_state_dict(torch.load(args.ppo2_ckpt, map_location=dev)["model"]); net2.eval()
+            ctrls[args.ppo2_label] = ("ppo", net2)
         if args.ppo_ckpt:
             net = RecurrentAC().to(dev); net.load_state_dict(torch.load(args.ppo_ckpt, map_location=dev)["model"]); net.eval()
-            ctrls["model-free PPO"] = ("ppo", net)
-        ctrls["privileged oracle"] = ("oracle_avoid", None)
+            ctrls[args.ppo_label] = ("ppo", net)
+        if not args.no_oracle:
+            ctrls["privileged oracle"] = ("oracle_avoid", None)
     return ctrls
 
 
@@ -135,14 +139,18 @@ def rollout(kind, model, env, obs, info, dev, H, srv=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--task", choices=["avoid", "goal"], default="goal")
+    ap.add_argument("--task", choices=["avoid", "goal", "explore"], default="goal")
     ap.add_argument("--nobs", type=int, default=0)
     ap.add_argument("--rooms", type=int, default=4)
     ap.add_argument("--starts", type=int, default=6)
     ap.add_argument("--H", type=int, default=6)
     ap.add_argument("--ppo-ckpt", default="")
+    ap.add_argument("--ppo-label", default="model-free PPO")
+    ap.add_argument("--ppo2-ckpt", default="")
+    ap.add_argument("--ppo2-label", default="PPO (2nd)")
     ap.add_argument("--dqn-ckpt", default="")
     ap.add_argument("--dqn-label", default="DQN (discrete)")
+    ap.add_argument("--no-oracle", action="store_true")
     ap.add_argument("--corpus", default="")
     ap.add_argument("--wm", default="")
     ap.add_argument("--out", required=True)
@@ -186,11 +194,13 @@ def main():
         srv.close(); print(f"  room {seed} done")
 
     clutter = "cluttered (3 pillars)" if args.nobs else "empty (no pillars)"
-    what = ("reach the doorway" if args.task == "goal" else "survive without crashing")
+    title = {"goal": "doorway-finding", "avoid": "obstacle avoidance",
+             "explore": "coverage / exploration"}[args.task]
+    what = {"goal": "reach the doorway", "avoid": "survive without crashing",
+            "explore": "cover new ground without crashing (paths should SWEEP, not park)"}[args.task]
     goalnote = "★ goal · " if args.task == "goal" else "✕ = crash · "
-    fig.suptitle(f"EchoRL — {('doorway-finding' if args.task=='goal' else 'obstacle avoidance')}, "
-                 f"{clutter}\ntrajectories to {what}; green = success, red = failure; "
-                 f"{goalnote}○ = start · grey = pillars", fontsize=13)
+    fig.suptitle(f"EchoRL — {title}, {clutter}\ntrajectories to {what}; "
+                 f"green = survived, red = crashed; {goalnote}○ = start · grey = pillars", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     fig.savefig(args.out, dpi=130); print(f"saved {args.out}")

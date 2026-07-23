@@ -112,6 +112,7 @@ def evaluate(net, seeds, device, episodes_per=6, t_max=40, sim_threads=2, nobs=3
     room_len = [[] for _ in range(vec.n)]
     room_coll = [[] for _ in range(vec.n)]
     room_succ = [[] for _ in range(vec.n)]
+    room_cov = [[] for _ in range(vec.n)]                      # coverage (explore task)
     cur = np.zeros(vec.n)
     h = torch.zeros(1, vec.n, net.H, device=device)
     obs = vec.reset()
@@ -129,10 +130,11 @@ def evaluate(net, seeds, device, episodes_per=6, t_max=40, sim_threads=2, nobs=3
                     room_len[i].append(cur[i])
                     room_coll[i].append(1.0 if infos[i].get("collision") else 0.0)
                     room_succ[i].append(1.0 if infos[i].get("success") else 0.0)
+                    room_cov[i].append(float(infos[i].get("coverage", 0)))
                 cur[i] = 0
     vec.close()
     rmean = lambda rr: float(np.mean([np.mean(r) for r in rr]))  # macro-average over rooms
-    return rmean(room_len), rmean(room_coll), rmean(room_succ)
+    return rmean(room_len), rmean(room_coll), rmean(room_succ), rmean(room_cov)
 
 
 # ---------------------------------------------------------------- training
@@ -147,6 +149,7 @@ def train(args):
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, eps=1e-5)
 
     GOAL = args.task == "goal"
+    EXPLORE = args.task == "explore"
     # goal mode: pre-filter to rooms WITH an opening so _spawn_room never churns servers
     # (spawn/close hunting for openings across 12 threads was crashing subprocesses).
     train_seeds = (opening_seeds(1, args.train_rooms, args.nobs) if GOAL
@@ -166,8 +169,8 @@ def train(args):
 
     print(f"device={device} | {N} envs x {args.sim_threads} thr | task={args.task} nobs={args.nobs} | "
           f"tag={tagn} seed={args.seed} | rollout {T} | target {args.steps} steps")
-    ml, cr, sr = evaluate(net, eval_seeds, device, t_max=args.t_max, nobs=args.nobs, task=args.task)
-    print(f"[init policy] len {ml:.1f} coll {cr:.2f} success {sr:.2f}")
+    ml, cr, sr, cov = evaluate(net, eval_seeds, device, t_max=args.t_max, nobs=args.nobs, task=args.task)
+    print(f"[init policy] len {ml:.1f} coll {cr:.2f} success {sr:.2f} coverage {cov:.1f}")
 
     obs = vec.reset()
     h = torch.zeros(1, N, net.H, device=device)
@@ -235,20 +238,21 @@ def train(args):
 
         if step - last_eval >= args.eval_every:
             last_eval = step
-            ml, cr, sr = evaluate(net, eval_seeds, device, t_max=args.t_max, nobs=args.nobs, task=args.task)
+            ml, cr, sr, cov = evaluate(net, eval_seeds, device, t_max=args.t_max, nobs=args.nobs, task=args.task)
             sps = step / (time.time() - t0)
-            metric = sr if GOAL else ml                  # goal: success rate; avoid: flight length
+            # best-ckpt metric: goal=success, explore=coverage, avoid=flight length
+            metric = cov if EXPLORE else (sr if GOAL else ml)
             mark = ""
             if metric > best_metric:
                 best_metric = metric
-                torch.save({"model": net.state_dict(), "eval": (ml, cr, sr), "step": step}, best_ck)
+                torch.save({"model": net.state_dict(), "eval": (ml, cr, sr, cov), "step": step}, best_ck)
                 mark = " *best"
-            print(f"step {step:6d} | eval len {ml:5.1f} coll {cr:.2f} success {sr:.2f} | "
+            print(f"step {step:6d} | eval len {ml:5.1f} coll {cr:.2f} success {sr:.2f} cov {cov:4.1f} | "
                   f"ent {ent.item():+.2f} pg {pg.item():+.3f} v {vloss.item():.2f} | {sps:.0f} steps/s{mark}")
 
-    ml, cr, sr = evaluate(net, eval_seeds, device, episodes_per=10, t_max=args.t_max, nobs=args.nobs, task=args.task)
-    bm = "success" if GOAL else "len"
-    print(f"\nFINAL (held-out): len {ml:.1f} coll {cr:.2f} success {sr:.2f} | "
+    ml, cr, sr, cov = evaluate(net, eval_seeds, device, episodes_per=10, t_max=args.t_max, nobs=args.nobs, task=args.task)
+    bm = "coverage" if EXPLORE else ("success" if GOAL else "len")
+    print(f"\nFINAL (held-out): len {ml:.1f} coll {cr:.2f} success {sr:.2f} coverage {cov:.1f} | "
           f"BEST {bm} {best_metric:.2f} -> {os.path.relpath(best_ck)}")
     vec.close()
 
@@ -275,8 +279,9 @@ def main():
     ap.add_argument("--eval-every", type=int, default=12000)
     ap.add_argument("--init-ckpt", type=str, default="")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--task", choices=["avoid", "goal"], default="avoid",
-                    help="avoid = Stage-0 obstacle avoidance; goal = Stage-2 home to the opening")
+    ap.add_argument("--task", choices=["avoid", "goal", "explore"], default="avoid",
+                    help="avoid = Stage-0 survive; goal = Stage-2 home to the opening; "
+                         "explore = coverage avoidance (must move to cover new ground, no parking)")
     ap.add_argument("--tag", type=str, default="", help="checkpoint/label tag (e.g. nomem, rangeonly)")
     ap.add_argument("--no-memory", action="store_true", help="ablate the GRU (feedforward policy)")
     ap.add_argument("--drop-range", action="store_true", help="ablate the matched-filter range stream")

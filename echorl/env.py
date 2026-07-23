@@ -138,10 +138,11 @@ class Discrete:
 class EchoLocEnv:
     def __init__(self, seed_pool=(1,), action_mode="continuous", nobs=3, sim_threads=0,
                  t_max=60, start_margin=0.8, resample_room_every=0, reward_cfg=None, base_seed=0,
-                 task="avoid", goal_radius=1.2):
+                 task="avoid", goal_radius=1.2, cell=1.0):
         assert action_mode in ("continuous", "discrete")
-        assert task in ("avoid", "goal")
+        assert task in ("avoid", "goal", "explore")
         self.task, self.goal_radius = task, goal_radius   # "goal": home to the room's opening
+        self.cell = cell                                   # "explore": coverage grid cell size (m)
         self.seed_pool = list(seed_pool)
         self.action_mode = action_mode
         self.nobs, self.sim_threads = nobs, sim_threads
@@ -170,7 +171,16 @@ class EchoLocEnv:
                            # zero-sum over a closed path, which let the agent hedge into risk-aversion).
                            # goal mode uses NON-TERMINAL collision: a bump costs w_bump and blocks
                            # the move (not episode-ending). w_dist is a small dense pull to the goal.
-                           w_goal=1.0, w_success=10.0, w_bump=0.3, w_dist=0.01)
+                           w_goal=1.0, w_success=10.0, w_bump=0.3, w_dist=0.01,
+                           # "explore" (redesigned Stage-0): reward VISITING NEW ground, not
+                           # merely surviving -- fixes the degenerate "park in open space" optimum
+                           # of the avoid task (PPO there stops moving; §3.4.1). Each new grid cell
+                           # = w_new; a per-step time cost w_time makes standing still strictly
+                           # losing; a small clearance term for learnability; collision is TERMINAL
+                           # (crash ends the flight) with penalty w_coll. So the optimum is to
+                           # SWEEP the room without crashing -- movement is forced, perception is
+                           # needed to route around walls/pillars.
+                           w_new=1.0, w_time=0.03, w_clear_ex=0.05)
         if reward_cfg:
             self.reward.update(reward_cfg)
 
@@ -256,6 +266,10 @@ class EchoLocEnv:
                          self._t / self.t_max * 2 - 1], dtype=np.float32)
         return dict(range=rng, coch=coch, prop=prop)
 
+    def _cell(self, x, z):
+        """Integer coverage-grid cell (explore task)."""
+        return (int(math.floor(x / self.cell)), int(math.floor(z / self.cell)))
+
     # -- gym API --
     def reset(self, *, seed=None, options=None):
         if seed is not None:
@@ -275,6 +289,8 @@ class EchoLocEnv:
                     break
                 self.x, self.z, self.yaw = self._sample_start()
             self._prev_d = math.hypot(self.x - self.goal[0], self.z - self.goal[1])
+        if self.task == "explore":
+            self._visited = {self._cell(self.x, self.z)}   # coverage set, seeded with start cell
         self._prev_clear = min(_wall_clearance(self.x, self.z, self.srv.Lx, self.srv.Lz),
                                _obstacle_clearance(self.x, self.z, self.srv.obstacles))
         obs = self._obs(self.x, self.z, self.yaw, 0.0, 0.0)
@@ -282,6 +298,8 @@ class EchoLocEnv:
                     seed=self.srv.seed, pose=(self.x, self.z, self.yaw))
         if self.task == "goal":
             info["goal"] = self.goal
+        if self.task == "explore":
+            info["coverage"] = len(self._visited)
         return obs, info
 
     def step(self, action):
@@ -314,6 +332,31 @@ class EchoLocEnv:
             obs = self._obs(self.x, self.z, self.yaw, dyaw, dstep)
             info = dict(collision=collided, success=success, dist=d, pose=(self.x, self.z, self.yaw))
             return obs, reward, bool(success), self._t >= self.t_max, info
+
+        if self.task == "explore":
+            # COVERAGE avoidance: reward NEW ground, per-step time cost, TERMINAL collision.
+            # Parking earns only the tiny clearance term minus the time cost -> strictly loses;
+            # the agent must keep moving into unvisited cells while not crashing.
+            if collided:
+                reward = -R["w_coll"]
+                obs = self._obs(self.x, self.z, self.yaw, dyaw, dstep)
+                info = dict(collision=True, success=False, coverage=len(self._visited),
+                            pose=(self.x, self.z, self.yaw))
+                return obs, reward, True, False, info
+            self.x, self.z, self.yaw = nx, nz, self.yaw + dyaw
+            cell = self._cell(self.x, self.z)
+            new = cell not in self._visited
+            if new:
+                self._visited.add(cell)
+            clear = min(_wall_clearance(self.x, self.z, self.srv.Lx, self.srv.Lz),
+                        _obstacle_clearance(self.x, self.z, self.srv.obstacles))
+            self._prev_clear = clear
+            shaped = math.tanh((clear - R["d_safe"]) / R["scale"])
+            reward = R["w_new"] * (1.0 if new else 0.0) - R["w_time"] + R["w_clear_ex"] * shaped
+            obs = self._obs(self.x, self.z, self.yaw, dyaw, dstep)
+            info = dict(collision=False, success=False, coverage=len(self._visited),
+                        pose=(self.x, self.z, self.yaw))
+            return obs, reward, False, self._t >= self.t_max, info
 
         # ---- avoid mode (Stage 0): TERMINAL collision ----
         if collided:
