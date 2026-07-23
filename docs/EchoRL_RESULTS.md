@@ -199,35 +199,38 @@ behavioural change is unmistakable.
 ### 3.6.1 Cue/memory ablation on the coverage task — the cues finally SEPARATE
 The payoff. On survive-only avoidance every ablation tied *exactly* (§3.4, 38.4/0.04) because
 the winning policy — stop — needed no perception. Re-running the same four configs on the
-**coverage** task (nobs=3, `explore`; clean eval = 12 held-out rooms × 20 eps; `echorl/
-explore_ablation_eval.py`):
+**coverage** task (nobs=3, `explore`; clean eval = 12 held-out rooms × 20 eps; **3 training
+seeds**; `echorl/explore_ablation_eval.py`):
 
-| config | coverage | collision |
-|---|---|---|
-| **full** (range + coch + memory) | **6.7** | 0.25 |
-| coch-only (binaural bearing) | **4.8** | 0.10 |
-| no-memory | 3.8 | 0.07 |
-| range-only (no bearing) | **1.8** | 0.08 |
+| config | coverage (mean ± SD) | per-seed | collision | drop from full |
+|---|---|---|---|---|
+| **full** (range + coch + memory) | **5.9 ± 1.2** | [6.8, 4.5, 6.3] | 0.25 | — |
+| coch-only (binaural bearing) | 4.5 ± 1.2 | [4.5, 3.3, 5.7] | 0.16 | −1.3 |
+| no-memory | 4.3 ± 1.2 | [3.8, 3.6, 5.7] | 0.15 | −1.5 |
+| **range-only** (no bearing) | **1.7 ± 0.3** | [1.8, 1.4, 1.9] | 0.06 | **−4.2** |
 
-**A Δ4.9-cell spread** (vs Δ0 on survive-only). Reading the single-drop effects from full:
-- **drop bearing** (range-only): **6.7 → 1.8** (−4.9) — by far the biggest hit; without the
-  binaural bearing cue the agent can't sweep-and-avoid and **reverts to parking** (coverage
-  ~1.8, collision back down to 0.08, the safe low-coverage mode).
-- **drop memory** (no-memory): 6.7 → 3.8 (−2.9) — memory genuinely helps *here*, unlike every
-  earlier task; coverage is the one job where remembering where you've been pays.
-- **drop range** (coch-only): 6.7 → 4.8 (−1.9) — smallest hit; range is the least important cue.
+**A Δ4.2-cell spread** (vs Δ0 on survive-only), robust across 3 seeds. What multi-seed shows:
+- **Binaural bearing is decisively the dominant cue.** Dropping it (range-only) collapses
+  coverage to **1.7 ± 0.3** — a −4.2 hit, and the *only* tight config (±0.3): on every seed
+  the bearing-less agent gives up sweeping and **reverts to parking** (coverage ~1.7, collision
+  back down to 0.06). This is airtight — no CI overlap with anything.
+- **Memory and range are a TIE at the second tier.** full − no-memory = −1.5 ≈ full −
+  range-only(coch dropped… i.e. keep-range) — more precisely `drop-range −1.3 ≈ drop-memory
+  −1.5`, with coch-only (4.5 ± 1.2) and no-memory (4.3 ± 1.2) **fully overlapping**. The
+  single-seed hint that "memory > range" (−2.9 vs −1.9) **washed out** — at n=3 they each
+  contribute a small, roughly-equal amount and are statistically indistinguishable.
+- The three "engaged" configs (full / coch-only / no-memory) all carry ±1.2 variance because
+  they trade coverage for collision risk (a seed-variable balance); only the parked
+  range-only config is low-variance.
 
-**Importance ordering: binaural bearing ≫ memory > range.** Two conclusions:
+**Importance ordering (3-seed): binaural bearing ≫ (memory ≈ range).** Two conclusions:
 1. The coverage redesign **un-saturates the avoidance task** — perception now clearly matters
-   (all three factors do), exactly as intended.
+   (Δ4.2 vs Δ0), exactly as intended.
 2. The **binaural bearing cue is the load-bearing feature for *both* navigation tasks** —
-   doorway-finding (§4.3) *and* coverage — a consistent through-line: two-ear direction is
-   what echo-guided navigation runs on; range/loudness alone is weak. And memory matters on
-   the one task (coverage) where it logically should.
-
-Caveat: single training seed per config (coverage is noisy; the 20-ep eval stabilises the
-*evaluation* but not training-seed variance) — the Δ4.9 spread and the bearing≫range ordering
-are large and clear, but multi-seed CIs would firm the memory-vs-range middle.
+   doorway-finding (§4.3) *and* coverage — a consistent, now multi-seed-confirmed through-line:
+   two-ear direction is what echo-guided navigation runs on; range/loudness alone is weak
+   (it can't even sustain a sweep). Memory helps modestly on coverage — the one task where it
+   logically should — but no more than range does.
 
 ---
 
@@ -522,14 +525,15 @@ more data. (Refuting one's own proposed fix, across seeds, is the point of runni
    (~3/100%); continuous PPO can stop and survives (38.4/4%). Memory and cue choice are
    irrelevant because the winning policy (stop in open space) barely needs perception — which
    is the real reason all ablations tie exactly.
-3. **The binaural bearing cue is the load-bearing feature for navigation — on BOTH tasks.**
-   Doorway-finding depends on it (cochleagram 0.68 ≈ full 0.66 ≫ range-only 0.48, §4.3), and
-   the redesigned **coverage** task independently confirms it (coch-only 4.8 ≫ range-only 1.8
-   cells; drop-bearing is the biggest hit, §3.6.1). Two-ear direction is what echo-guided
-   navigation runs on; range/loudness alone is weak. Memory matters on coverage specifically
-   (the task where remembering visited ground helps). This also un-saturates avoidance: on the
-   coverage task the cues finally SEPARATE (Δ4.9 cells) vs the degenerate survive-only task
-   where they tied exactly.
+3. **The binaural bearing cue is the load-bearing feature for navigation — on BOTH tasks,
+   multi-seed confirmed.** Doorway-finding depends on it (cochleagram 0.68 ≈ full 0.66 ≫
+   range-only 0.48, §4.3), and the redesigned **coverage** task independently confirms it over
+   3 seeds (drop-bearing = −4.2 cells, the dominant hit; range-only collapses to 1.7 ± 0.3,
+   reverting to parking, §3.6.1). Two-ear direction is what echo-guided navigation runs on;
+   range/loudness alone can't even sustain a sweep. Memory and range are a *second-tier tie*
+   (each ~−1.4, indistinguishable at n=3 — the single-seed "memory > range" hint washed out).
+   This also un-saturates avoidance: coverage cues SEPARATE (Δ4.2 cells) vs the degenerate
+   survive-only task where they tied exactly.
 4. **A transferable RL lesson:** how you define *failure* (terminal vs non-terminal
    collision) mattered more than model sophistication for the goal task — terminal
    collision induced risk-averse hedging that no reward-weight tuning fixed.

@@ -33,26 +33,38 @@ def main():
     ap.add_argument("--episodes-per", type=int, default=20)
     ap.add_argument("--eval-rooms", type=int, default=12)
     ap.add_argument("--t-max", type=int, default=60)
+    ap.add_argument("--seeds", type=int, default=1, help="number of training seeds to aggregate (0..N-1)")
     args = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    seeds = list(range(600, 600 + args.eval_rooms))
-    print(f"Coverage-task cue ablation — nobs={args.nobs}, {len(seeds)} held-out rooms x "
-          f"{args.episodes_per} eps, t_max={args.t_max}\n")
+    rooms = list(range(600, 600 + args.eval_rooms))
+    print(f"Coverage-task cue ablation — nobs={args.nobs}, {len(rooms)} held-out rooms x "
+          f"{args.episodes_per} eps, t_max={args.t_max}, {args.seeds} training seed(s)\n")
     rows = []
     for tag, kw, label in CONFIGS:
-        ck = os.path.join(_HERE, "ckpt", f"ppo_explore_nobs{args.nobs}_{tag}_s0_best.pt")
-        if not os.path.exists(ck):
-            print(f"  {label:26s}  MISSING ({os.path.relpath(ck)})"); continue
-        net = RecurrentAC(**kw).to(dev); net.load_state_dict(torch.load(ck, map_location=dev)["model"]); net.eval()
-        ml, cr, sr, cov = evaluate(net, seeds, dev, episodes_per=args.episodes_per,
-                                   t_max=args.t_max, nobs=args.nobs, task="explore")
-        rows.append((label, cov, cr, ml)); print(f"  {label:26s}  coverage {cov:5.1f}  collision {cr:.2f}  len {ml:.1f}")
+        covs, crs = [], []
+        for s in range(args.seeds):
+            ck = os.path.join(_HERE, "ckpt", f"ppo_explore_nobs{args.nobs}_{tag}_s{s}_best.pt")
+            if not os.path.exists(ck):
+                continue
+            net = RecurrentAC(**kw).to(dev); net.load_state_dict(torch.load(ck, map_location=dev)["model"]); net.eval()
+            _ml, cr, _sr, cov = evaluate(net, rooms, dev, episodes_per=args.episodes_per,
+                                         t_max=args.t_max, nobs=args.nobs, task="explore")
+            covs.append(cov); crs.append(cr)
+        if not covs:
+            print(f"  {label:26s}  MISSING"); continue
+        cm, csd = np.mean(covs), (np.std(covs, ddof=1) if len(covs) > 1 else 0.0)
+        rows.append((label, cm, csd, covs))
+        print(f"  {label:26s}  coverage {cm:5.1f} +/- {csd:.1f}  collision {np.mean(crs):.2f}  "
+              f"| seeds {[round(c,1) for c in covs]}")
     if rows:
         best = max(rows, key=lambda r: r[1]); worst = min(rows, key=lambda r: r[1])
-        print(f"\n  spread: best {best[0]} {best[1]:.1f}  vs  worst {worst[0]} {worst[1]:.1f}  "
-              f"(Δ {best[1]-worst[1]:.1f} cells)")
-        print("  → cues SEPARATE (perception matters here)" if best[1] - worst[1] > 1.5
-              else "  → cues still ~tie (task may still be perception-light)")
+        print(f"\n  spread: {best[0]} {best[1]:.1f}  vs  {worst[0]} {worst[1]:.1f}  (Δ {best[1]-worst[1]:.1f} cells)")
+        # per-config drop from full
+        full = next((r for r in rows if r[0].startswith("full")), None)
+        if full:
+            for lab, cm, _sd, _cv in rows:
+                if not lab.startswith("full"):
+                    print(f"    full − {lab:24s} = {full[1]-cm:+.1f}")
 
 
 if __name__ == "__main__":
