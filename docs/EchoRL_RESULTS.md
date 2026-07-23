@@ -194,9 +194,40 @@ elicit.
 So the redesign works in both tiers: the winning policy is now sustained flight that must use
 perception (route around clutter), not stopping. Headline: `results/echorl_explore_nobs{0,3}.png`
 put the old parked agent and the new sweeping agent side-by-side on the same rooms — the
-behavioural change is unmistakable. Natural follow-on (not yet run): re-run the cue/memory
-ablations on this task — unlike survive-only (where they tied because perception was unused),
-coverage-in-clutter should finally make perception *matter* and separate the cues.
+behavioural change is unmistakable.
+
+### 3.6.1 Cue/memory ablation on the coverage task — the cues finally SEPARATE
+The payoff. On survive-only avoidance every ablation tied *exactly* (§3.4, 38.4/0.04) because
+the winning policy — stop — needed no perception. Re-running the same four configs on the
+**coverage** task (nobs=3, `explore`; clean eval = 12 held-out rooms × 20 eps; `echorl/
+explore_ablation_eval.py`):
+
+| config | coverage | collision |
+|---|---|---|
+| **full** (range + coch + memory) | **6.7** | 0.25 |
+| coch-only (binaural bearing) | **4.8** | 0.10 |
+| no-memory | 3.8 | 0.07 |
+| range-only (no bearing) | **1.8** | 0.08 |
+
+**A Δ4.9-cell spread** (vs Δ0 on survive-only). Reading the single-drop effects from full:
+- **drop bearing** (range-only): **6.7 → 1.8** (−4.9) — by far the biggest hit; without the
+  binaural bearing cue the agent can't sweep-and-avoid and **reverts to parking** (coverage
+  ~1.8, collision back down to 0.08, the safe low-coverage mode).
+- **drop memory** (no-memory): 6.7 → 3.8 (−2.9) — memory genuinely helps *here*, unlike every
+  earlier task; coverage is the one job where remembering where you've been pays.
+- **drop range** (coch-only): 6.7 → 4.8 (−1.9) — smallest hit; range is the least important cue.
+
+**Importance ordering: binaural bearing ≫ memory > range.** Two conclusions:
+1. The coverage redesign **un-saturates the avoidance task** — perception now clearly matters
+   (all three factors do), exactly as intended.
+2. The **binaural bearing cue is the load-bearing feature for *both* navigation tasks** —
+   doorway-finding (§4.3) *and* coverage — a consistent through-line: two-ear direction is
+   what echo-guided navigation runs on; range/loudness alone is weak. And memory matters on
+   the one task (coverage) where it logically should.
+
+Caveat: single training seed per config (coverage is noisy; the 20-ep eval stabilises the
+*evaluation* but not training-seed variance) — the Δ4.9 spread and the bearing≫range ordering
+are large and clear, but multi-seed CIs would firm the memory-vs-range middle.
 
 ---
 
@@ -491,9 +522,14 @@ more data. (Refuting one's own proposed fix, across seeds, is the point of runni
    (~3/100%); continuous PPO can stop and survives (38.4/4%). Memory and cue choice are
    irrelevant because the winning policy (stop in open space) barely needs perception — which
    is the real reason all ablations tie exactly.
-3. **The harder goal task exposes cue importance.** Doorway-finding depends on the
-   **binaural bearing cue** (cochleagram 0.68 ≈ full 0.66 ≫ range-only 0.48, fair eval),
-   exactly as the acoustics predict; under fair eval memory shows a modest positive effect.
+3. **The binaural bearing cue is the load-bearing feature for navigation — on BOTH tasks.**
+   Doorway-finding depends on it (cochleagram 0.68 ≈ full 0.66 ≫ range-only 0.48, §4.3), and
+   the redesigned **coverage** task independently confirms it (coch-only 4.8 ≫ range-only 1.8
+   cells; drop-bearing is the biggest hit, §3.6.1). Two-ear direction is what echo-guided
+   navigation runs on; range/loudness alone is weak. Memory matters on coverage specifically
+   (the task where remembering visited ground helps). This also un-saturates avoidance: on the
+   coverage task the cues finally SEPARATE (Δ4.9 cells) vs the degenerate survive-only task
+   where they tied exactly.
 4. **A transferable RL lesson:** how you define *failure* (terminal vs non-terminal
    collision) mattered more than model sophistication for the goal task — terminal
    collision induced risk-averse hedging that no reward-weight tuning fixed.
@@ -574,6 +610,12 @@ python echorl/mpc.py --nobs 3 --train-ep 360 --skip-eval --corpus-out echorl/cor
 python echorl/mpc_direct.py --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --nobs 3 --seeds 3
 # Exp D (§5.5): does on-policy (DAgger) data fix the direct-outcome MPC? (negative)
 python echorl/mpc_dagger.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --nobs 0 --rounds 4 --seed 0
+# Redesigned coverage/explore task (§3.6) + its cue ablation (§3.6.1):
+python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag cover
+python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag nomem --no-memory
+python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag rangeonly --drop-coch
+python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag cochonly --drop-range
+python echorl/explore_ablation_eval.py --nobs 3 --episodes-per 20
 # Trajectory maps -- all 4 conditions (task x clutter), columns = controllers:
 python echorl/render_traj.py --task avoid --nobs 0 --dqn-ckpt echorl/ckpt/dqn_stage0_nobs0_best.pt --ppo-ckpt echorl/ckpt/ppo_stage0_nobs0_best.pt --out results/echorl_avoid_nobs0.png
 python echorl/render_traj.py --task avoid --nobs 3 --dqn-ckpt echorl/ckpt/dqn_stage0_nobs1_best.pt --ppo-ckpt echorl/ckpt/ppo_stage0_nobs3_best.pt --out results/echorl_avoid_nobs3.png
