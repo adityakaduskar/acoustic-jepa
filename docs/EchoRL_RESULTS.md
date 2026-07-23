@@ -232,6 +232,32 @@ seeds**; `echorl/explore_ablation_eval.py`):
    (it can't even sustain a sweep). Memory helps modestly on coverage — the one task where it
    logically should — but no more than range does.
 
+### 3.6.2 The bearing cue is CLUTTER-SPECIFIC (empty vs cluttered dissociation)
+Running the same ablation on **empty** coverage rooms (nobs=0, single seed, clean 20-ep eval)
+inverts the picture:
+
+| config | coverage — nobs=0 (empty) | coverage — nobs=3 (cluttered, 3-seed) |
+|---|---|---|
+| full | 14.9 | 5.9 ± 1.2 |
+| range-only (no bearing) | **12.6** (−2.3) | **1.7 ± 0.3** (−4.2, collapses to parking) |
+| coch-only (bearing) | 11.7 (−3.1) | 4.5 ± 1.2 (−1.3) |
+| no-memory | 11.3 (−3.6) | 4.3 ± 1.2 (−1.5) |
+
+**Without pillars, bearing stops mattering.** In empty rooms range-only stays at 12.6 (near
+full's 14.9) — dropping bearing is the *smallest* hit (−2.3), not the largest; and range-only
+**does not collapse to parking** (12.6 vs the 1.7 it collapses to in clutter). The importance
+order flips to **memory ≳ range > bearing**.
+
+This gives the sharpest, most unifying reading of the whole cue story: **the binaural bearing
+cue matters exactly when the task requires localizing a *direction to a spatial feature*** —
+the acoustic void of a doorway (§4.3), or the obstacles you must route around in clutter
+(§3.6.1). When there is no such feature — undirected sweeping of an *open* room — you only
+need range (wall proximity) and memory (where you've been), and bearing is redundant. So
+"bearing is load-bearing" is not about navigation in general; it is specifically the cue for
+**spatial-feature localization**, and it dominates precisely to the degree the task demands it.
+(Caveat: nobs=0 here is single-seed vs the 3-seed nobs=3; but the effect is a ~7× swing in how
+much bearing matters — range-only 1.7→12.6 — far larger than the ±1.2 training-seed noise.)
+
 ---
 
 ## 4. Stage 2 — goal approach (doorway-finding)
@@ -525,15 +551,17 @@ more data. (Refuting one's own proposed fix, across seeds, is the point of runni
    (~3/100%); continuous PPO can stop and survives (38.4/4%). Memory and cue choice are
    irrelevant because the winning policy (stop in open space) barely needs perception — which
    is the real reason all ablations tie exactly.
-3. **The binaural bearing cue is the load-bearing feature for navigation — on BOTH tasks,
-   multi-seed confirmed.** Doorway-finding depends on it (cochleagram 0.68 ≈ full 0.66 ≫
-   range-only 0.48, §4.3), and the redesigned **coverage** task independently confirms it over
-   3 seeds (drop-bearing = −4.2 cells, the dominant hit; range-only collapses to 1.7 ± 0.3,
-   reverting to parking, §3.6.1). Two-ear direction is what echo-guided navigation runs on;
-   range/loudness alone can't even sustain a sweep. Memory and range are a *second-tier tie*
-   (each ~−1.4, indistinguishable at n=3 — the single-seed "memory > range" hint washed out).
-   This also un-saturates avoidance: coverage cues SEPARATE (Δ4.2 cells) vs the degenerate
-   survive-only task where they tied exactly.
+3. **The binaural bearing cue is the cue for SPATIAL-FEATURE LOCALIZATION — it dominates
+   exactly when the task needs to find a direction to something.** It carries doorway-finding
+   (cochleagram 0.68 ≈ full 0.66 ≫ range-only 0.48, §4.3) and cluttered coverage (drop-bearing
+   −4.2 cells over 3 seeds; range-only collapses to parking 1.7 ± 0.3, §3.6.1) — both require
+   localizing a spatial feature (the doorway void; obstacles to route around). But on **empty**
+   coverage (nobs=0, §3.6.2) bearing becomes the *least* important cue (drop-bearing only −2.3,
+   no collapse) — undirected sweeping of an open room needs only range (wall proximity) +
+   memory. So "bearing is load-bearing" is clutter/feature-specific, not general. Memory helps
+   modestly (most on the tasks where remembering position pays). This also un-saturates
+   avoidance: coverage cues SEPARATE (Δ4.2 cells) vs the degenerate survive-only task where
+   they tied exactly.
 4. **A transferable RL lesson:** how you define *failure* (terminal vs non-terminal
    collision) mattered more than model sophistication for the goal task — terminal
    collision induced risk-averse hedging that no reward-weight tuning fixed.
