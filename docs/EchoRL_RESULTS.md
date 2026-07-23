@@ -183,9 +183,20 @@ Empty rooms (nobs=0), PPO training curve (`results/echorl_explore_nobs0.png`):
   now **sweeps the room** (the render is unambiguous: old avoid-PPO = tiny stubs; new
   coverage-PPO = big space-filling loops), covering ~15× more ground than parking.
 
-So the redesign works: the winning policy is now *skilled sustained flight*, not stopping.
-(Cluttered nobs=3 coverage + whether the cue ablations finally separate on a task that
-actually requires perception — the interesting follow-on — is in progress.)
+Cluttered rooms (nobs=3, `results/echorl_explore_nobs3.png`): best coverage **6.5 cells @
+~20% collision** (vs 15 @ 4% empty). The task is now **genuinely hard and non-degenerate** —
+there is a real **cover-vs-crash tradeoff** (higher coverage buys higher collision, and the
+agent intermittently retreats toward a safer low-coverage mode), and the render shows it
+**weaving its sweep around the pillars** — routing coverage around obstacles it senses only
+acoustically. This is the *skilled* echo-guided flight the survive-only task could not
+elicit.
+
+So the redesign works in both tiers: the winning policy is now sustained flight that must use
+perception (route around clutter), not stopping. Headline: `results/echorl_explore_nobs{0,3}.png`
+put the old parked agent and the new sweeping agent side-by-side on the same rooms — the
+behavioural change is unmistakable. Natural follow-on (not yet run): re-run the cue/memory
+ablations on this task — unlike survive-only (where they tied because perception was unused),
+coverage-in-clutter should finally make perception *matter* and separate the cues.
 
 ---
 
