@@ -555,6 +555,32 @@ past a reactive policy; the fixes that would matter are a less-exploitable plann
 (trust-region / uncertainty-penalised CEM) or a fundamentally less myopic observation, not
 more data. (Refuting one's own proposed fix, across seeds, is the point of running it.)
 
+### 5.6 Why the cluttered MPC is stuck at ~0.24 — and why a clearance cost doesn't fix it
+The §5.4 MPC (0.24–0.25 on nobs=3 goal) sits **below even the privileged *greedy* oracle (0.54)**,
+so two problems stack: **(A)** the cost is *distance-to-goal only* — no obstacle term, so it
+drives at the goal and wedges behind pillars, inheriting the greedy objective's 0.54 ceiling;
+and **(B)** weak dynamics + objective mismatch degrade it further, 0.54 → 0.24.
+
+Attacking **A** directly (`echorl/mpc_clearance.py`): add an obstacle-**clearance** readout to
+the world model and a clearance penalty to the CEM cost —
+`Σ dist + w_pen·Σ relu(d_safe − clearance)` — so the planner can *see* pillars and route around
+them. The clearance readout trains cleanly (**R²=0.95** on real observations — the encoder
+*does* represent obstacle proximity). But the sweep (one WM, cost-only change, 12 rooms × 10):
+
+| w_pen | 0 (= §5 MPC) | 2 | 5 | 10 |
+|---|---|---|---|---|
+| success | 0.22 | 0.19 | 0.17 | 0.20 |
+
+**It doesn't help — it monotonically *hurts* (0→2→5).** Not a tuning miss (that would give an
+inverted-U); the clearance term is an *actively misleading* signal. The reason is diagnostic:
+the readout is accurate on **real** observations (0.95), but CEM evaluates it on **predicted
+(rolled-out)** latents, where the weak dynamics (§5.1's predictor path) corrupts it — so more
+weight on a corrupted signal costs more. **Problem A cannot be fixed independently of Problem
+B**: cost-shaping is useless when the planner can only access the cost through a broken forward
+model. This redirects to the real bottleneck — a **less-exploitable / uncertainty-penalised
+planner** (ensemble-MPC that distrusts high-variance predictions), the same fix §5.2/§5.5 point
+to. (Single-seed sweep; the monotone-hurt trend and the R²-real-vs-rollout gap are the signal.)
+
 ## 6. Summary of findings
 
 1. **Echo-only avoidance is "solved," but degenerately — PPO learns to STOP** (§3.4.1). It
