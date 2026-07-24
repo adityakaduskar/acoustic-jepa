@@ -233,30 +233,40 @@ seeds**; `echorl/explore_ablation_eval.py`):
    logically should — but no more than range does.
 
 ### 3.6.2 The bearing cue is CLUTTER-SPECIFIC (empty vs cluttered dissociation)
-Running the same ablation on **empty** coverage rooms (nobs=0, single seed, clean 20-ep eval)
-inverts the picture:
+Running the same ablation on **empty** coverage rooms (nobs=0, **3 seeds**, clean 20-ep eval)
+and setting it against the cluttered result — the drops-from-full and, crucially, whether the
+cue's removal causes *collapse to parking*:
 
-| config | coverage — nobs=0 (empty) | coverage — nobs=3 (cluttered, 3-seed) |
+| config | nobs=0 (empty, 3-seed) | nobs=3 (cluttered, 3-seed) |
 |---|---|---|
-| full | 14.9 | 5.9 ± 1.2 |
-| range-only (no bearing) | **12.6** (−2.3) | **1.7 ± 0.3** (−4.2, collapses to parking) |
-| coch-only (bearing) | 11.7 (−3.1) | 4.5 ± 1.2 (−1.3) |
-| no-memory | 11.3 (−3.6) | 4.3 ± 1.2 (−1.5) |
+| full | 14.0 ± 3.1 | 5.9 ± 1.2 |
+| coch-only (bearing) | 13.6 ± 2.5 (drop range **−0.3**) | 4.5 ± 1.2 (−1.3) |
+| range-only (no bearing) | 11.2 ± 1.3 (drop bearing **−2.8**, no collapse) | **1.7 ± 0.3** (drop bearing **−4.2, COLLAPSES to parking**) |
+| no-memory | 10.6 ± 2.3 (drop memory **−3.4**) | 4.3 ± 1.2 (−1.5) |
 
-**Without pillars, bearing stops mattering.** In empty rooms range-only stays at 12.6 (near
-full's 14.9) — dropping bearing is the *smallest* hit (−2.3), not the largest; and range-only
-**does not collapse to parking** (12.6 vs the 1.7 it collapses to in clutter). The importance
-order flips to **memory ≳ range > bearing**.
+**The robust dissociation — bearing's *criticality* is clutter-specific.** Removing bearing
+costs −2.8 in empty rooms but the agent still covers fine (11.2, ~80 % of full); in clutter
+the same removal costs −4.2 **and triggers collapse to parking** (1.7, ~30 % of full). So
+bearing goes from *helpful* (empty) to *critical / do-or-die* (clutter) — exactly where you
+must localize obstacle directions to route around them.
 
-This gives the sharpest, most unifying reading of the whole cue story: **the binaural bearing
-cue matters exactly when the task requires localizing a *direction to a spatial feature*** —
-the acoustic void of a doorway (§4.3), or the obstacles you must route around in clutter
-(§3.6.1). When there is no such feature — undirected sweeping of an *open* room — you only
-need range (wall proximity) and memory (where you've been), and bearing is redundant. So
-"bearing is load-bearing" is not about navigation in general; it is specifically the cue for
-**spatial-feature localization**, and it dominates precisely to the degree the task demands it.
-(Caveat: nobs=0 here is single-seed vs the 3-seed nobs=3; but the effect is a ~7× swing in how
-much bearing matters — range-only 1.7→12.6 — far larger than the ±1.2 training-seed noise.)
+**What multi-seed corrected** (vs the earlier single-seed nobs=0 read): the single seed had
+range looking important in empty (coch-only 11.7, −3.1) and bearing looking least important
+(−2.3). Both were draws — at 3 seeds, **range barely matters in empty** (coch-only 13.6 ≈ full
+14.0, drop-range only −0.3) and bearing is the *second*-biggest factor (−2.8). Corrected
+empty-room order: **memory (−3.4) ≈ bearing (−2.8) ≫ range (−0.3)**. A new wrinkle also
+appears: **memory matters *more* in empty (−3.4) than in clutter (−1.5)** — sensible, since in
+an open room efficient coverage is mostly a book-keeping problem (don't re-visit), whereas in
+clutter bearing-driven obstacle-routing dominates and memory is secondary.
+
+**Unifying reading (holds under multi-seed):** the binaural bearing cue matters — and becomes
+*critical* — exactly when the task requires localizing a **direction to a spatial feature**:
+the acoustic void of a doorway (§4.3), or obstacles to route around in clutter (§3.6.1).
+Undirected sweeping of an *open* room does not need it (range is near-useless there; memory
+does the work). "Bearing is load-bearing" is therefore **feature/clutter-specific**, not a
+general property of navigation. (Empty-room CIs are wide — ±2.5–3.1 — so within-empty rankings
+of memory-vs-bearing overlap; the *cross-condition* claim, drop-bearing −2.8→−4.2 with collapse
+only in clutter, is the solid one.)
 
 ---
 
@@ -556,10 +566,11 @@ more data. (Refuting one's own proposed fix, across seeds, is the point of runni
    (cochleagram 0.68 ≈ full 0.66 ≫ range-only 0.48, §4.3) and cluttered coverage (drop-bearing
    −4.2 cells over 3 seeds; range-only collapses to parking 1.7 ± 0.3, §3.6.1) — both require
    localizing a spatial feature (the doorway void; obstacles to route around). But on **empty**
-   coverage (nobs=0, §3.6.2) bearing becomes the *least* important cue (drop-bearing only −2.3,
-   no collapse) — undirected sweeping of an open room needs only range (wall proximity) +
-   memory. So "bearing is load-bearing" is clutter/feature-specific, not general. Memory helps
-   modestly (most on the tasks where remembering position pays). This also un-saturates
+   coverage (nobs=0, 3-seed, §3.6.2) removing bearing costs only −2.8 and the agent still covers
+   fine (11.2, no collapse) — vs −4.2 *and collapse to parking* in clutter. So bearing goes from
+   *helpful* to *critical* with clutter — clutter/feature-specific, not general. (In empty rooms
+   range is near-useless, drop-range −0.3; memory does the book-keeping, mattering more there
+   −3.4 than in clutter −1.5.) This also un-saturates
    avoidance: coverage cues SEPARATE (Δ4.2 cells) vs the degenerate survive-only task where
    they tied exactly.
 4. **A transferable RL lesson:** how you define *failure* (terminal vs non-terminal
