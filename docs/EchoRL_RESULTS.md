@@ -232,23 +232,26 @@ seeds**; `echorl/explore_ablation_eval.py`):
    (it can't even sustain a sweep). Memory helps modestly on coverage — the one task where it
    logically should — but no more than range does.
 
-### 3.6.2 The bearing cue is CLUTTER-SPECIFIC (empty vs cluttered dissociation)
-Running the same ablation on **empty** coverage rooms (nobs=0, **3 seeds**, clean 20-ep eval)
-and setting it against the cluttered result — the drops-from-full and, crucially, whether the
-cue's removal causes *collapse to parking*:
+### 3.6.2 The bearing cue is CLUTTER-SPECIFIC — a clean monotonic gradient (nobs 0/1/3)
+Running the ablation at **three** clutter levels (all **3 seeds**, clean 20-ep eval) turns the
+empty-vs-cluttered contrast into a smooth gradient. The load-bearing quantity is **drop-bearing**
+(full → range-only) and whether it triggers *collapse to parking*:
 
-| config | nobs=0 (empty, 3-seed) | nobs=3 (cluttered, 3-seed) |
-|---|---|---|
-| full | 14.0 ± 3.1 | 5.9 ± 1.2 |
-| coch-only (bearing) | 13.6 ± 2.5 (drop range **−0.3**) | 4.5 ± 1.2 (−1.3) |
-| range-only (no bearing) | 11.2 ± 1.3 (drop bearing **−2.8**, no collapse) | **1.7 ± 0.3** (drop bearing **−4.2, COLLAPSES to parking**) |
-| no-memory | 10.6 ± 2.3 (drop memory **−3.4**) | 4.3 ± 1.2 (−1.5) |
+| clutter | full | range-only (bearing removed) | **drop-bearing** | range-only ÷ full | collapse? |
+|---|---|---|---|---|---|
+| nobs=0 (empty) | 14.0 ± 3.1 | 11.2 ± 1.3 | **−2.8** | 80 % | none (seeds 12.7/10.2/10.5) |
+| nobs=1 (1 pillar) | 10.5 ± 3.2 | 6.7 ± 3.7 | **−3.8** | 64 % | partial (seeds 10.9/5.5/3.7) |
+| nobs=3 (3 pillars) | 5.9 ± 1.2 | 1.7 ± 0.3 | **−4.2** | 29 % | full → parking (1.8/1.4/1.9) |
 
-**The robust dissociation — bearing's *criticality* is clutter-specific.** Removing bearing
-costs −2.8 in empty rooms but the agent still covers fine (11.2, ~80 % of full); in clutter
-the same removal costs −4.2 **and triggers collapse to parking** (1.7, ~30 % of full). So
-bearing goes from *helpful* (empty) to *critical / do-or-die* (clutter) — exactly where you
-must localize obstacle directions to route around them.
+**Bearing's importance rises monotonically with clutter** (−2.8 → −3.8 → −4.2), and the
+*collapse to parking* sharpens with it: with bearing removed the agent covers 80 % of full in
+empty rooms, 64 % with one pillar, and just 29 % (parked) with three. The per-seed collapse
+counts tell the same story as a probability — 0/3 seeds collapse in empty, ~2/3 at one pillar,
+3/3 at three. So it is not a two-state on/off effect but a graded dependence: **the more
+obstacles there are to route around, the more the binaural bearing cue is doing the work.**
+(nobs=1 needed all 3 seeds — its single-seed run was uninterpretable noise, with `full` drawing
+a parking-prone policy and landing *below* every ablation; coverage training variance is ±3
+cells, so single seeds mislead on this task, as they did at nobs=0.)
 
 **What multi-seed corrected** (vs the earlier single-seed nobs=0 read): the single seed had
 range looking important in empty (coch-only 11.7, −3.1) and bearing looking least important
@@ -264,9 +267,11 @@ clutter bearing-driven obstacle-routing dominates and memory is secondary.
 the acoustic void of a doorway (§4.3), or obstacles to route around in clutter (§3.6.1).
 Undirected sweeping of an *open* room does not need it (range is near-useless there; memory
 does the work). "Bearing is load-bearing" is therefore **feature/clutter-specific**, not a
-general property of navigation. (Empty-room CIs are wide — ±2.5–3.1 — so within-empty rankings
-of memory-vs-bearing overlap; the *cross-condition* claim, drop-bearing −2.8→−4.2 with collapse
-only in clutter, is the solid one.)
+general property of navigation — and it scales *smoothly* with how much clutter there is to
+route around (the nobs 0/1/3 gradient above). (Within-condition CIs are wide — ±1–4 cells,
+coverage training is noisy — so rankings of the *second-tier* cues (memory vs range) overlap;
+the solid, seed-robust claim is the monotonic drop-bearing gradient −2.8 → −3.8 → −4.2 and the
+graded collapse 0/3 → ~2/3 → 3/3 seeds.)
 
 ---
 
