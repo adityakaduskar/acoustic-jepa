@@ -581,6 +581,44 @@ model. This redirects to the real bottleneck — a **less-exploitable / uncertai
 planner** (ensemble-MPC that distrusts high-variance predictions), the same fix §5.2/§5.5 point
 to. (Single-seed sweep; the monotone-hurt trend and the R²-real-vs-rollout gap are the signal.)
 
+### 5.7 Uncertainty-penalised ensemble MPC also fails — and *why* closes the case
+The fix §5.2/§5.5/§5.6 all pointed to: an **ensemble** of K=5 latent dynamics predictors
+(shared encoder + readout, bootstrap-trained), with CEM penalising action sequences the
+ensemble *disagrees* on — `mean_k Σdist + λ·std_k(Σdist)` — so the planner avoids the
+off-distribution regions where the model is confidently wrong. `echorl/mpc_ensemble.py`, one
+ensemble swept over λ (cost-only). nobs=3, 12 rooms × 10:
+
+| λ | 0 (averaged model) | 1 | 3 | 6 |
+|---|---|---|---|---|
+| success | 0.16 | 0.14 | 0.10 | 0.09 |
+
+**Also a monotone-hurt negative**, and even λ=0 (0.16) is *below* the §5 single model (0.25) —
+averaging the ensemble made the forward model *worse* for planning. The diagnostic says why:
+ensemble **disagreement is 0.13 m but rollout error is 0.54 m** — the members are wrong in a
+*correlated* way (shared encoder → they fail together), so disagreement underestimates true
+error ~4× and, worse, the disagreement that exists tracks the *goal-directed* maneuvers (which
+are off-distribution) — so penalising it steers *away* from the plans that reach the goal.
+
+**Synthesis — the MPC ceiling is perception-limited, not planner-limited.** Four independent
+fixes now fail for one reason:
+
+| fix (§) | idea | result | why it fails |
+|---|---|---|---|
+| accurate direct head (5.2) | make the cost model accurate (R²=0.96) | 0.29 < 0.51 | CEM exploits it off-distribution |
+| DAgger (5.5) | aggregate the planner's own data | 0.30→0.36, no trend | doesn't remove the exploit |
+| clearance cost (5.6) | add obstacle term to the cost | monotone hurt | evaluated through the broken rollout |
+| ensemble uncertainty (5.7) | distrust high-variance predictions | monotone hurt | correlated errors → disagreement ≪ error |
+
+They all route through the same **latent-dynamics rollout**, whose ceiling is set by §5.1's
+finding: a *single ping* determines the action-consequence at only **R²≈0.43** (partial-H0).
+No cost, data, or uncertainty trick fixes a rollout that is myopic at the source. The genuinely
+different lever is a **less myopic observation** — a *temporal/recurrent* world model that
+integrates pings over time to build state before predicting, rather than planning from one
+ping. That is a perception redesign, not a planner tweak, and it is the honest next direction
+for model-based control here. Model-free PPO sidesteps all of this by never rolling a model
+forward — which is exactly why it wins when reaction suffices, and why *both* paradigms remain
+far below the privileged planning oracle (1.00) that has ground-truth geometry.
+
 ## 6. Summary of findings
 
 1. **Echo-only avoidance is "solved," but degenerately — PPO learns to STOP** (§3.4.1). It
