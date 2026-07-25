@@ -5,15 +5,19 @@ that navigates from **binaural echoes only**, in 3D, with physically-rendered
 reverberant acoustics. 3D, rendered-acoustics successor to Mohan & Vanderelst 2020
 (*Training a simulated bat*, SSCI). Design doc: `EchoRL_PLAN.md`.
 
-Status as of **2026-07-21**: Stage 0 (obstacle avoidance) and Stage 2 (goal
+Status as of **2026-07-24**: Stage 0 (obstacle avoidance) and Stage 2 (goal
 approach / doorway-finding) both complete, with oracle ceilings, ablations, and
 multi-seed CIs; a **model-based (CEM-MPC) vs model-free (PPO)** comparison on the doorway
 task (§5), a Δd probe diagnosing the MPC gap (§5.1), an objective-mismatch result where a
 near-perfect cost model plans *worse* (§5.2), a **cluttered-room showdown (§5.4)** whose
 render exposed an **evaluation bug** that had inflated the model-free numbers — corrected
 throughout, producing a clean **model-free/model-based crossover** (reactive PPO wins empty
-rooms; it collapses and model-based wins when the task requires planning) — and an honest
-**negative (§5.5)**: the named on-policy (DAgger) fix does not rescue the planner. All numbers
+rooms; it collapses and model-based wins when the task requires planning) — an honest
+**negative (§5.5)**: the named on-policy (DAgger) fix does not rescue the planner; and a
+**mapping experiment (§5.8)** that implements §5.7's "integrate pings over time" lever
+explicitly — a known-pose occupancy map + planner ≈ **doubles** the latent-WM MPC on the
+cluttered doorway task (0.49 ± 0.08 vs 0.24) but hits a genuine *information* ceiling (weak,
+correlated per-ping geometry: walls mapped, pillars missed, doorway ~2.8 m). All numbers
 are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the 3000+
 corpus band). Trajectory maps for every condition: `results/echorl_{avoid,goal}_nobs{0,3}.png`
 (task × clutter; columns = controllers, green = success, red = failure).
@@ -619,6 +623,118 @@ for model-based control here. Model-free PPO sidesteps all of this by never roll
 forward — which is exactly why it wins when reaction suffices, and why *both* paradigms remain
 far below the privileged planning oracle (1.00) that has ground-truth geometry.
 
+### 5.8 The mapping experiment — testing §5.7's "integrate over time" lever explicitly
+§5.7 concluded the cluttered-doorway MPC ceiling is **perception-limited, not planner-limited**
+(a single ping fixes action-consequence at only R²≈0.43), and named the honest next lever: *a
+temporal model that integrates pings over time to build state before planning*. This experiment
+implements that lever in its most explicit, interpretable form — build an **occupancy MAP** from
+the echo sequence, then run the already-known-good planner on it — and decomposes the result.
+Code: `echorl/{mapping,mapper_collect,mapper,mapper_probe,mapper_fuse,mapper_nav,mapper_render}.py`.
+Fixed room-centred grid (48×48, 0.25 m cells). **Scope caveat: KNOWN-POSE mapping** — the agent
+knows its own (x,z,yaw) and infers only *geometry* from echoes, isolating the echo→map question
+from localization. This is a new **privileged-pose, learned-geometry** rung, more privileged than
+PPO/MPC (proprioception only) but far less than the full oracle (true geometry); dead-reckoned /
+SLAM pose is the follow-up rung. All numbers on held-out doorway rooms (seeds 600+), per-room
+macro-average (same protocol as §5.4).
+
+**Planning side de-risked (M0).** A grid version of the gate_b planner, run on the *true*
+rasterized map, scores **0.96** (nobs=3) — reproducing the privileged planning oracle (1.00) up to
+grid discretization. So **0.96 is the "perfect-map" ceiling**; any shortfall of the learned
+controller is *mapping* error, cleanly isolated.
+
+**The per-ping signal is weak in clutter (`mapper_probe.py`).** A fresh encoder decoding geometry
+from a *single* observation (+ yaw), held-out nobs=3: dist-to-goal **R²=0.25** (vs §5's 0.98 — but
+that was the *empty*-room readout; interior pillars scatter the echoes), ego-bearing-to-goal
+**37° MAE**, dist-to-pillar R²=0.52, ego-bearing-to-pillar 43°. A single cluttered-room ping
+barely sees the geometry — the concrete mechanism behind §5.1's low ceiling.
+
+**Known-pose fusion helps but SATURATES (`mapper_fuse.py`).** Because the poses are known, many
+weak pings can be fused: a per-ping net predicts an ego (dist, bearing)-to-doorway with a learned
+heteroscedastic confidence; each is transformed to a world point via the pose; the confidence-
+weighted mean is a multilateration of the doorway. Held-out doorway-localization error falls
+3.7 m (1 ping) → **2.8 m (≈20 pings), then flat** — extra pings stop helping. The per-ping errors
+are **correlated across poses** (the same encoder mis-reads a given room consistently; likely the
+binaural front-back bearing ambiguity a 2-mic array cannot resolve from one ping), so averaging
+cannot drive them out. 2.8 m is still >2× the 1.2 m goal radius. (The coordinate transform was
+unit-tested to 1e-16, so 2.8 m is a perception result, not a bug.)
+
+**Occupancy: walls yes, pillars no (`mapper.py`, scatter-CNN).** A scatter-and-refine mapper
+writes per-ping encoder features into the canvas at known poses and a U-Net refines them.
+Held-out: **solid-IoU 0.78** (room extent, saturated from just 2 pings) but **pillar-IoU ≈ 0.005**
+— the interior pillars are essentially never localized (the weak per-ping pillar signal does not
+fuse into precise cells). The render (`results/echorl_mapping_nobs3.png`) shows it: a fuzzy but
+correctly-sized room rectangle, no interior obstacles, doorway estimate within ~1–3 m.
+
+**Closed-loop navigation — the headline (`mapper_nav.py`).** Each step the known-pose agent pings
+the true server, re-estimates the map + doorway, and plans on them; physics use true geometry. The
+value of *closed* loop is re-fusion from new vantage points, which recovers a lot the 2.8 m static
+number would not predict. nobs=3, 12 rooms × 8, **3 model seeds**:
+
+| controller (nobs=3 goal, held-out) | success |
+|---|---|
+| planning oracle (true geom + pose) | 1.00 |
+| grid-planner on TRUE map (M0, perfect-map ceiling) | 0.96 |
+| learned occ + **true** goal (obstacle-mapping only) | ~0.67 |
+| **true** occ + fused goal (doorway-mapping only) | ~0.60 |
+| greedy oracle (true geom, no avoidance) | 0.54 |
+| **FULL learned map (occ + fused goal)** | **0.49 ± 0.08** (0.54/0.40/0.53) |
+| learned-WM MPC (§5.4) | 0.24–0.25 |
+| model-free PPO (§5.4) | 0.08–0.18 |
+
+**Result: explicit known-pose mapping + planning ≈ doubles the latent-WM MPC (0.49 vs 0.24) and is
+3–6× model-free PPO (0.08–0.18), matching the privileged *greedy* oracle (0.54).** §5.7's lever
+*works* — but only in explicit-map form (the latent WM could not integrate over time; an explicit
+metric map with known poses can), and only **partway**: the map stays coarse (walls recovered,
+pillars missed, doorway ~2.8 m), so the controller lands at ~half the perfect-map ceiling (0.96).
+The decomposition shows **both halves are imperfect and errors compound**: each half with the other
+made true reaches only ~0.60–0.67, and together ~0.49. Doorway-localization (~0.60) is the slightly
+*more* limiting half than obstacle-mapping (~0.67) — consistent with §4.3 (the binaural bearing to
+the doorway is the hard, load-bearing cue). Caveats: single corpus, 3 model seeds; eval carries
+~±0.04 render-jitter noise; per-room success ranges [0.0, 1.0] (room difficulty varies).
+
+**The advantage survives removing the pose privilege (`mapper_nav_dr.py`).** The headline above is
+*known-pose* — a rung above PPO/MPC, which get proprioception only. To make the comparison fair, the
+agent instead **dead-reckons** its pose by integrating its own commanded actions and builds/fuses the
+map in that estimated frame (echoes are rendered at the true pose but *attributed* to the estimated
+one, so drift corrupts the map exactly like real odometry error). In this deterministic sim, dead
+reckoning is exact except when a non-terminal collision blocks a commanded move — and the doorway
+sits near a wall, so bumps (hence drift) concentrate right where precision matters. 3 model seeds,
+nobs=3, 12 rooms × 8:
+
+| pose source | success | vs known-pose |
+|---|---|---|
+| known pose (headline) | **0.49 ± 0.08** | — |
+| dead-reckoned, bump-aware (robot feels a blocked move) | **0.41 ± 0.03** | −0.08 |
+| dead-reckoned, pure (no bump sensing, hardest) | **0.37 ± 0.06** | −0.12 |
+
+So the pose privilege was worth only ~0.08–0.12, and **even fully unprivileged (proprioception only,
+the *same* information PPO/MPC get), explicit mapping (~0.37–0.41) still clearly beats the latent-WM
+MPC (0.24) and is ~2–5× PPO (0.08–0.18).** Bump-aware DR recovers a third of the loss, confirming
+bump-induced drift is the degradation mechanism (as predicted from the wall-adjacent doorway). §5.8's
+conclusion is therefore robust to its main caveat: on the cluttered doorway task, an explicit metric
+map + planner beats both the latent world model and model-free RL, privileged pose or not.
+
+**A recurrent doorway estimator improves the STATIC metric but makes CONTROL worse — the
+static≠control dissociation, a third time (`mapper_seq.py`).** The 2.8 m fusion saturation looked
+like binaural front-back ambiguity (a 2-mic array can't disambiguate a bearing from one ping;
+independent per-ping fusion can't fix it), so §5.7's literal prescription — *a temporal model that
+integrates pings before predicting* — should exploit motion parallax to resolve it. A GRU over the
+(echo, pose) sequence → direct world-frame doorway regression does lower the open-loop error: on the
+same held-out set, doorway-loc falls 3.71→**2.04 m** (recurrent) vs 3.71→2.84 (fusion) — a real
+~0.8 m gain, the saturation partially broken. **But in closed loop it navigates *worse*: 0.29 ± 0.06
+(3 seeds) vs the fusion controller's 0.49**, and with high run-to-run variance (one seed swung
+0.26↔0.41 across repeats). So the *more accurate* doorway estimator is the *worse* controller — the
+same **static-decodability ≠ control** result as §5.2 (a near-perfect cost model planned worse) and
+the AcousticJEPA `RESULTS.md` headline, now recurring at the *perception* layer. Likely mechanism
+(as in §5.2/§5.5): the stateful GRU is trained on random-walk trajectories but deployed on the
+policy's *goal-directed* distribution, where its hidden state generalizes poorly and injects chaotic
+variance into the loop; the stateless per-ping fusion, processing each ping independently, is
+distribution-shift-robust by construction. On-policy aggregation (DAgger) is the indicated fix but
+§5.5 already showed it does not reliably help here. **So the stateless fusion remains the controller
+of choice, and the honest close is that the ~2.8→2.0 m doorway floor is genuine echo information —
+lowering it further did not buy control.** The gap to the 0.96 perfect-map ceiling is set by the
+perception–control interaction, not by static estimator accuracy.
+
 ## 6. Summary of findings
 
 1. **Echo-only avoidance is "solved," but degenerately — PPO learns to STOP** (§3.4.1). It
@@ -674,6 +790,20 @@ far below the privileged planning oracle (1.00) that has ground-truth geometry.
    numbers recomputed; every qualitative conclusion held. MPC/oracle numbers were never
    affected (fixed episodes per room), and the render figures were per-episode-correct
    throughout — the nobs=3 render is what exposed the bug.
+9. **Explicit mapping partially rescues the cluttered task where the latent WM could not
+   (§5.8) — §5.7's "integrate over time" lever, done right.** Building an occupancy MAP from
+   the echo sequence at KNOWN POSES and planning on it ≈ **doubles** the latent-WM MPC (0.49 ±
+   0.08 vs 0.24) and is 3–6× model-free PPO (0.08–0.18), matching the privileged greedy oracle
+   (0.54). But it reaches only ~half the perfect-map ceiling (0.96): per-ping geometry in clutter
+   is weak (dist-to-goal R²=0.25, bearings ~40° MAE) *and* correlated across poses, so even
+   known-pose fusion saturates — walls are recovered (solid-IoU 0.78) but interior pillars are
+   missed (pillar-IoU ≈0) and the doorway localizes to only ~2.8 m. So the lever works, but the
+   ceiling is genuine information content, not architecture. **Not a pose-privilege artifact:**
+   dead-reckoned proprioception (the same information PPO/MPC get) drops it only to 0.41 ± 0.03
+   (bump-aware) / 0.37 ± 0.06 (pure) — still clearly above MPC (0.24), 2–5× PPO. And a **recurrent**
+   doorway estimator (§5.7's literal "temporal model") *does* lower the open-loop doorway floor
+   (2.8→2.0 m) but navigates **worse** in closed loop (0.29 vs fusion 0.49) — a *static-accuracy ≠
+   control* dissociation (cf. §5.2), the stateful model fragile under the policy's own distribution.
 
 ## 7. Honest limitations (for a writeup)
 - Not a scored head-to-head with Mohan & Vanderelst: different sim (2D analytic vs 3D
@@ -722,6 +852,20 @@ python echorl/mpc.py --nobs 3 --train-ep 360 --skip-eval --corpus-out echorl/cor
 python echorl/mpc_direct.py --corpus echorl/corpus_goal_nobs3.pkl --wm echorl/ckpt/mpc_wm_nobs3.pt --nobs 3 --seeds 3
 # Exp D (§5.5): does on-policy (DAgger) data fix the direct-outcome MPC? (negative)
 python echorl/mpc_dagger.py --corpus echorl/corpus_goal.pkl --wm echorl/ckpt/mpc_wm.pt --nobs 0 --rounds 4 --seed 0
+# Mapping experiment (§5.8) -- explicit occupancy map + planning on the cluttered doorway task:
+python echorl/mapping.py --eval-rooms 12 --episodes-per 10                    # M0 grid-planner on TRUE map (0.96 ceiling)
+python echorl/mapper_collect.py --rooms 300 --ep-per-room 3 --out echorl/mapper_corpus_nobs3.pkl
+python echorl/mapper_probe.py --corpus echorl/mapper_corpus_nobs3.pkl         # per-ping decodability in clutter (weak)
+python echorl/mapper.py train --corpus echorl/mapper_corpus_nobs3.pkl --out echorl/ckpt/mapper_nobs3.pt   # occupancy mapper
+python echorl/mapper_fuse.py train --target goal --out echorl/ckpt/egovec_goal_nobs3.pt                    # known-pose doorway fusion
+python echorl/mapper.py evalq --ckpt echorl/ckpt/mapper_nobs3.pt              # M1 occ quality (solid-IoU 0.78, pillar ~0)
+python echorl/mapper_fuse.py evalq --ckpt echorl/ckpt/egovec_goal_nobs3.pt    # M1 fused doorway err vs #pings (3.7->2.8 m)
+python echorl/mapper_nav.py --eval-rooms 12 --episodes-per 8                  # M2 closed-loop ladder + decomposition (full 0.49)
+python echorl/mapper_nav_dr.py --seeds 1 2 3                                  # unprivileged dead-reckoned pose (DR 0.37-0.41)
+python echorl/mapper_seq.py train --out echorl/ckpt/seqgoal_nobs3.pt          # recurrent (GRU) doorway estimator
+python echorl/mapper_seq.py evalq --ckpt echorl/ckpt/seqgoal_nobs3.pt         # open-loop 3.7->2.0 m (beats fusion) ...
+python echorl/mapper_nav.py --modes scatter+seq                              # ... but closed-loop 0.29 < fusion 0.49 (static!=control)
+python echorl/mapper_render.py                                                # results/echorl_mapping_nobs3.png
 # Redesigned coverage/explore task (§3.6) + its cue ablation (§3.6.1):
 python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag cover
 python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag nomem --no-memory
@@ -738,7 +882,10 @@ python echorl/render_traj.py --task goal  --nobs 3 --ppo-ckpt echorl/ckpt/ppo_go
 Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
 `ppo_nobs{0,1,3}_full_s0_best.pt` (Stage-0 + ablations `_{nomem,rangeonly,cochonly}_s{0,1,2}`),
 `ppo_goal_nobs0_{full,rangeonly,cochonly,nomem}_s{0,1,2}_best.pt` (Stage-2). `mpc.py` trains
-its world model on the fly (random-trajectory corpus), so it saves no checkpoints.
+its world model on the fly (random-trajectory corpus), so it saves no checkpoints. Mapping
+(§5.8): `mapper_nobs3{,_s2,_s3}.pt` (occupancy), `egovec_goal_nobs3{,_s2,_s3}.pt` (doorway
+fusion); corpus `mapper_corpus_nobs3.pkl`; figure `results/echorl_mapping_nobs3.png`.
 
 Code: `src/episode_server.cpp`, `src/verify_episode_server.py`,
-`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,mpc_direct,mpc_dagger,probe_dd,gate_b,render_traj,collect_corpus,smoke_test}.py`.
+`echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,mpc_direct,mpc_dagger,probe_dd,gate_b,render_traj,collect_corpus,smoke_test}.py`,
+mapping `echorl/{mapping,mapper_collect,mapper,mapper_probe,mapper_fuse,mapper_seq,mapper_nav,mapper_nav_dr,mapper_render}.py`.
