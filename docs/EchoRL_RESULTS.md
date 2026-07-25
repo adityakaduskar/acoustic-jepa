@@ -17,10 +17,13 @@ rooms; it collapses and model-based wins when the task requires planning) — an
 **mapping experiment (§5.8)** that implements §5.7's "integrate pings over time" lever
 explicitly — a known-pose occupancy map + planner ≈ **doubles** the latent-WM MPC on the
 cluttered doorway task (0.49 ± 0.08 vs 0.24) but hits a genuine *information* ceiling (weak,
-correlated per-ping geometry: walls mapped, pillars missed, doorway ~2.8 m); and **§5.9**, which
+correlated per-ping geometry: walls mapped, pillars missed, doorway ~2.8 m); **§5.9**, which
 breaks part of that ceiling *without touching either estimator's accuracy* — consuming the
-binaural bearing **reactively** and the clearance readout as a **map** takes the same task to
-**0.59 ± 0.04** against a 0.95 perfect-map ceiling. All numbers
+binaural bearing **reactively** rather than as a fused coordinate is worth +0.063 ± 0.024, taking
+the task to **0.52** against a 0.95 ceiling (its companion clearance-map fix measured nil once
+re-run at 3× the episodes, and a claimed interaction between them is **retracted** — see the
+correction in §5.9); and **§5.10**, active sensing: a head-scan halves the doorway bearing error
+(83.9° → 44.6°) and buys no measurable control. All numbers
 are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the 3000+
 corpus band). Trajectory maps for every condition: `results/echorl_{avoid,goal}_nobs{0,3}.png`
 (task × clutter; columns = controllers, green = success, red = failure).
@@ -791,27 +794,43 @@ near zero because it only maps a thin trace along the path, whereas the scatter-
 comes mostly from the easy exterior; the two are complementary, which is why they are summed in
 log-odds for the controller.
 
-**Closed loop — the 2×2** (nobs=3 goal, 12 held-out rooms × 8, **3 model seeds**, macro-average
-per room; identical protocol to §5.4/§5.8):
+**⚠ Statistical correction (2026-07-25).** The first version of this section reported the 2×2 at
+12 rooms × **8** episodes — 96 binary episodes per cell, whose binomial standard error (~0.05 at
+p≈0.5) is *the same size as the effects being claimed*. Nine independent runs of one identical
+config spread over 0.500–0.625 (sd **0.038**), confirming it. The per-seed spread was therefore
+reported as if it were the whole uncertainty when it was mostly single-run sampling noise, and
+"positive in 3/3 seeds" is weak evidence when each seed is one noisy draw. Everything below is
+re-measured at **12 rooms × 24 = 288 episodes per cell** (se ≈ 0.029). **One claim did not
+survive: the super-additive interaction between A and B was noise.**
+
+**Closed loop — the 2×2** (nobs=3 goal, 12 held-out rooms × **24**, **3 model seeds**,
+macro-average per room; identical protocol to §5.4/§5.8):
 
 | | fused doorway POINT (§5.8) | **reactive BEARING** (§5.9) |
 |---|---|---|
-| **scatter-CNN map** (§5.8) | 0.465 ± 0.022 | 0.535 ± 0.006 |
-| **+ clearance field** (§5.9) | 0.472 ± 0.049 | **0.587 ± 0.037** |
+| **scatter-CNN map** (§5.8) | 0.456 | **0.519** |
+| **+ clearance field** (§5.9) | 0.462 | 0.514 |
 
-Paired per-seed deltas vs the §5.8 baseline: **A alone +0.069 ± 0.027** (positive in 3/3),
-**B alone +0.007 ± 0.052** (nil), **A+B +0.121 ± 0.048**, and **B on top of A +0.052 ± 0.031**
-(positive in 3/3). So the two are **super-additive, with an interaction of ≈+0.045**: a better
-obstacle map is worth *nothing* while the goal estimate is 2.8 m wrong — it only routes you
-accurately to the wrong place — and becomes worth +0.05 once the goal cue is usable. That is the
-same lesson as §5.6 one layer up: a signal's value is set by what consumes it.
+Paired per-seed deltas: **A alone +0.063 ± 0.024** (+0.035/+0.073/+0.080, positive 3/3 — the one
+effect this section establishes); **B alone +0.006** (+0.007/0.000/+0.011 — reliably *nothing*);
+**B on top of A −0.005 ± 0.040** (+0.042/−0.021/−0.035 — **nothing, and not even consistently
+signed**). At this sample size effects below ≈0.04 are not resolvable, so the honest reading is:
 
-**Where the remaining gap lives** (3 seeds, same protocol): giving the §5.9 controller perfect
-obstacles lifts it 0.587 → **0.674**; giving it the perfect doorway lifts it to **0.785**. As in
-§5.8 both halves are imperfect and compound (0.674 & 0.785 → 0.587), and the **doorway half is
-still the bigger limiter** (−0.198 vs −0.087) — the load-bearing cue remains the hardest one,
-exactly as §4.3 said. The ladder: PPO 0.08–0.18 → latent-WM MPC 0.24 → §5.8 map 0.47 → **§5.9
-map 0.59** → perfect map 0.95.
+> **The reactive consumer (A) is the whole §5.9 result. The clearance field (B) does not help —
+> alone or in combination.** Its 10× pillar-IoU gain (0.005 → 0.049) is real but far too small in
+> absolute terms to change the planner's decisions; the earlier "+0.052 on top of A / interaction
+> +0.045" was a 96-episode artifact and is retracted.
+
+That B is *reliably* nil (+0.006, three seeds, tight) is still informative — it says the cluttered
+doorway task is not obstacle-map-limited at this level of map quality, which the §5.8 decomposition
+already hinted (perfect *obstacles* was the smaller of the two levers).
+
+**Where the remaining gap lives** (3 seeds, at the older 8-episode resolution — treat as ±0.05):
+giving the controller perfect obstacles measured **0.674**; giving it the perfect doorway
+measured **0.785**, against ~0.52 for the learned version. The **doorway half is the bigger
+limiter** (≈−0.27 vs ≈−0.15) — the load-bearing cue remains the hardest one, exactly as §4.3
+said, and consistent with B (the obstacle half) buying nothing. The ladder: PPO 0.08–0.18 →
+latent-WM MPC 0.24 → §5.8 map 0.46 → **§5.9 reactive 0.52** → perfect map 0.95.
 
 **Ablation — a contradiction carve.** The clearance field marks surfaces ~0.4 m away and
 config-space inflation is 0.5 m, so the map can swallow the agent's own cell, after which every
@@ -823,10 +842,58 @@ does not want to be overridden. Both settings agree on the headline; the numbers
 as an extra mechanism rather than folded into the result.
 
 **Honest scope.** Known-pose, like §5.8's headline (the dead-reckoning rung of §5.8 was not
-re-run here). Single corpus, 3 model seeds, ~±0.04 render-jitter noise, per-room success spans
-[0.0, 1.0]. The reactive controller has three constants (EMA α, lookahead bounds) chosen once and
-not swept — a sweep could move the absolute number, but the +0.069 / +0.052 deltas are paired
-per-seed against a baseline sharing every other component.
+re-run here). Single corpus, 3 model seeds. The reactive controller has three constants (EMA α,
+lookahead bounds) chosen once and not swept. Effects below ≈0.04 are below this eval's resolution
+even at 288 episodes — a lesson applied retroactively above.
+
+### 5.10 Active sensing (fix C) — a large perceptual gain that buys no control
+§5.9 left the doorway half as the binding limit and proved the *consumer* is not at fault (true
+bearing, no range → 0.938 vs the 0.948 ceiling), so the residual is bearing **estimation** error.
+The textbook remedy is motion: a 2-mic array resolves front-back ambiguity from a baseline, and
+bats famously scan with head movements. Code: `echorl/mapper_active.py`.
+
+**The gate (open loop): which kind of motion actually helps?** Six oracle-driven motion policies
+in held-out rooms, matched pings and comparable distance-to-goal — `orbit` (baseline ⟂ to the
+target = maximum parallax), `radial` (baseline ∥ = none), `spin` (rotate in place = zero
+baseline, aspect only), `scan` (approach **and** sweep ±45°), `approach` (drive straight at it —
+*what the §5.9 controller does*), and `random` (the corpus policy). 36 trajectories each, 40 pings:
+
+| policy | fused doorway err | reactive **direction** err | mean dist |
+|---|---|---|---|
+| random (corpus / training distribution) | **3.11 m** | **40.4°** | 3.45 |
+| scan (approach + ±45° sweep) | 3.70 m | 44.6° | 2.85 |
+| orbit (max parallax) | 3.74 m | 57.9° | 2.72 |
+| spin (aspect only) | 3.92 m | 62.3° | 2.78 |
+| radial (no parallax) | 4.23 m | 80.6° | 2.28 |
+| **approach (the §5.9 trajectory)** | 4.19 m | **83.9°** | 2.00 |
+
+Three readings. (a) **It is ASPECT, not parallax.** Orbit beats radial by 23°, but plain scanning
+beats orbit by another 13°: which way you are *facing* when you ping matters more than where you
+stand. (b) **The §5.9 controller produces the worst possible input for its own estimator** —
+driving at the goal scores 83.9°, bottom of the table, while being *closest* to it (2.00 m);
+adding a head sweep to the same radial policy halves that to 44.6°. A closed-loop controller
+degrading its own perception is a new, concrete mechanism for the doorway gap. (c) **The best
+policy is the training distribution** — random walk wins outright, and that is exactly what
+`EgoVecNet` was trained on, so part of what "active sensing" buys here is staying on-distribution
+rather than new geometry (the §5.2/§5.5/§5.8 distribution-shift theme, now at the level of gait).
+
+**Closed loop: it does not convert.** The subgoal is swept ±`scan_deg` off the estimated bearing,
+annealed by the filter's circular concentration (scan while bearings disagree, commit once they
+agree); `scan_deg=0` reproduces §5.9 exactly. At 288 episodes × 3 seeds, 30° scanning scores
+**0.538 vs 0.514** — **+0.024 ± 0.013**, positive in 3/3 seeds but *below this eval's ≈0.04
+resolution*. A 0/15/30/45° sweep at the lower resolution was flat (0.507/0.514/0.548/0.497).
+**Verdict: not established.**
+
+**Why the gain doesn't pay, and the fourth instance of the pattern.** The mechanism is a hard
+threshold plus an immediate cost. Success requires arriving within 1.2 m; 44.6° of direction
+error at 3 m is still 2.3 m of lateral miss, so scanning moves the estimate a long way *without
+crossing the line that scores*, while the ±45° zig-zag costs ~cos 45° ≈ 30% of forward speed
+inside a 40-step budget. Partial perceptual improvements do not pay when the task's reward has a
+threshold. And so, a **fourth** time in this project, a large improvement in a static perceptual
+metric fails to become control: §5.2 (cost model R²=0.96, halved success), §5.8 (recurrent
+estimator 2.84→2.04 m, 0.49→0.29), the AcousticJEPA headline, and now −39° of doorway bearing for
++0.024 ± 0.013 of success. The corrected §5.9 above is arguably a fifth: B improved pillar-IoU
+10× for nothing.
 
 ## 6. Summary of findings
 
@@ -913,6 +980,27 @@ per-seed against a baseline sharing every other component.
     so the ring is dominated by the wall behind the agent; pillar-IoU 0.005 → 0.049 (10×) only
     with direction. The doorway half remains the bigger limiter (−0.198 vs −0.087 to ceiling).
 
+    **⚠ SUPERSEDED — see the correction in §5.9.** Re-measured at 288 episodes/cell (the 96-episode
+    protocol above carries ~0.05 of binomial noise, the size of the effects): **A survives at
+    +0.063 ± 0.024** (0.456 → 0.519, 3/3 seeds), but **B is nil (+0.006 alone, −0.005 on top of
+    A)** and the **super-additive interaction is retracted as an artifact**. The corrected reading:
+    the reactive consumer is the whole result, the task is doorway-limited rather than
+    obstacle-map-limited, and B's real 10× pillar-IoU gain is too small in absolute terms to change
+    a planner decision.
+11. **Active sensing improves the percept a lot and the control not at all (§5.10) — a fourth
+    instance of static ≠ control.** An oracle-motion gate shows the doorway estimate responds to
+    **aspect** diversity, not translational parallax: scanning beats maximum-parallax orbiting,
+    and the §5.9 controller's own straight-at-the-goal trajectory is the **worst** input in the
+    set (83.9° direction error while being *closest* to the target, 2.00 m) — a controller
+    degrading its own perception. Adding a head sweep to the same radial policy halves that to
+    44.6°. In closed loop it is worth **+0.024 ± 0.013**, below this eval's ≈0.04 resolution:
+    **not established**. The mechanism is a threshold — 45° of bearing error at 3 m is still a
+    2.3 m miss against a 1.2 m goal radius, so the estimate improves a long way without crossing
+    the line that scores, while the zig-zag costs ~30% of forward speed in a fixed step budget.
+    Also notable: the best motion policy is a **random walk** — the estimator's own training
+    distribution — so part of what active sensing buys here is staying on-distribution rather
+    than acquiring new geometry.
+
 ## 7. Honest limitations (for a writeup)
 - Not a scored head-to-head with Mohan & Vanderelst: different sim (2D analytic vs 3D
   rendered), different collision metric (their per-call proximity count vs our terminal/
@@ -978,11 +1066,17 @@ python echorl/mapper_render.py                                                # 
 python echorl/mapper_react.py train-clear --directional                       # SurfNet: nearest-surface point (R2 0.84, 20 deg)
 python echorl/mapper_react.py train-clear                                     # isotropic clearance net (the ring ablation)
 python echorl/mapper_react.py mapq                                            # open-loop pillar-IoU 0.005 -> 0.049
-python echorl/mapper_react.py nav --ego-carve 0 \
+python echorl/mapper_react.py nav --ego-carve 0 --episodes-per 24 \
   --modes true+true true+reacttrue scatter+fuse scatter+react both+fuse both+react true+react both+true
 #   ^ the 2x2 + ceilings; repeat with --occ-ckpt/--goal-ckpt/--surf-ckpt *_s2,*_s3 for the 3 seeds.
+#     USE --episodes-per 24: at 8 the binomial noise (~0.05) swamps the effects -- that is what
+#     produced the retracted A-x-B interaction. See the correction at the top of §5.9.
 #     true+reacttrue = the mechanism control (TRUE bearing, no range): 0.938 vs true-goal 0.948.
-#     drop --ego-carve 0 for the contradiction-carve ablation (A+B 0.604).
+#     drop --ego-carve 0 for the contradiction-carve ablation.
+# Active sensing (§5.10, fix C) -- aspect beats parallax open-loop, buys no control:
+python echorl/mapper_active.py gate --eval-rooms 12 --ep-per-room 3   # the motion-policy gate
+python echorl/mapper_react.py nav --ego-carve 0 --episodes-per 24 --scan-deg 30 --modes both+react
+#     scan-deg 0 == §5.9 exactly; 30 deg scores +0.024 +/- 0.013 (below resolution).
 # Redesigned coverage/explore task (§3.6) + its cue ablation (§3.6.1):
 python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag cover
 python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag nomem --no-memory

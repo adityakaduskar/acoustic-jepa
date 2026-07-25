@@ -138,11 +138,13 @@ C_FUSE, C_REACT = "#2a78d6", "#eb6834"
 
 
 def react_clearance():
-    # per-seed success, nobs=3 goal, 12 held-out rooms x 8 (no-carve = exact §5.8 protocol)
-    runs = {("scatter", "fuse"):  [0.448, 0.458, 0.490],
-            ("scatter", "react"): [0.542, 0.531, 0.531],
-            ("both", "fuse"):     [0.510, 0.417, 0.490],
-            ("both", "react"):    [0.625, 0.552, 0.583]}
+    # per-seed success, nobs=3 goal, 12 held-out rooms x 24 = 288 episodes/cell.
+    # The first version used 8 eps/room; 96 binary episodes carry ~0.05 of binomial noise,
+    # which manufactured an A-x-B interaction that did not survive. See the §5.9 correction.
+    runs = {("scatter", "fuse"):  [0.479, 0.417, 0.472],
+            ("scatter", "react"): [0.514, 0.490, 0.552],
+            ("both", "fuse"):     [0.486, 0.417, 0.483],
+            ("both", "react"):    [0.556, 0.469, 0.517]}
     mean = {k: float(np.mean(v)) for k, v in runs.items()}
     sd = {k: float(np.std(v, ddof=1)) for k, v in runs.items()}
     CEIL = 0.948                                   # planner on the TRUE map
@@ -166,12 +168,12 @@ def react_clearance():
     axL.axhline(CEIL, ls="--", lw=1, color="#888")
     axL.text(1.52, CEIL + 0.012, "perfect-map ceiling 0.95", ha="right", va="bottom",
              color="#666", fontsize=9)
-    # the interaction, stated on the chart
-    axL.annotate("", xy=(1 + (w + 0.02) / 2, mean[("both", "react")]),
-                 xytext=(0 + (w + 0.02) / 2, mean[("scatter", "react")]),
-                 arrowprops=dict(arrowstyle="->", color="#8a4a25", lw=1.4, ls=(0, (4, 2))))
-    axL.text(0.5, 0.68, "+0.05 only\nonce the goal\ncue is usable", ha="center",
-             color="#8a4a25", fontsize=9, fontweight="bold")
+    # what the re-powered data says: the map half is flat, the consumer half is not
+    axL.annotate("", xy=(1 - (w + 0.02) / 2, mean[("both", "fuse")] + 0.06),
+                 xytext=(0 - (w + 0.02) / 2, mean[("scatter", "fuse")] + 0.06),
+                 arrowprops=dict(arrowstyle="->", color="#7a7a7a", lw=1.3, ls=(0, (4, 2))))
+    axL.text(0.5, 0.80, "the clearance map buys nothing\neither way (+0.01 alone, −0.01 on top)",
+             ha="center", color="#5a5a5a", fontsize=9, fontweight="bold")
     axL.set_xticks(x)
     axL.set_xticklabels(["scatter-CNN map\n(§5.8)", "+ clearance field\n(§5.9)"])
     axL.set_xlabel("obstacle map")
@@ -179,16 +181,16 @@ def react_clearance():
     axL.set_ylim(0, 1.26); axL.set_xlim(-0.55, 1.55)
     axL.grid(axis="y", color=GRID, lw=0.7); axL.set_axisbelow(True)
     axL.legend(loc="upper left", bbox_to_anchor=(0.0, 1.0), frameon=False, fontsize=9.5)
-    axL.set_title("Same map, different CONSUMER of the bearing cue",
+    axL.set_title("The CONSUMER of the bearing is the whole effect",
                   fontsize=10.5, fontweight="bold", loc="left")
 
     # -- right: where §5.9 sits on the whole §5 ladder --
     rows = [("model-free PPO", 0.13, "#9a9a9a"),
             ("latent-WM MPC", 0.245, "#9a9a9a"),
             ("§5.8 map + fused point", mean[("scatter", "fuse")], C_FUSE),
-            ("§5.9 map + reactive bearing", mean[("both", "react")], C_REACT),
-            ("    → given perfect obstacles", 0.674, "#f0a480"),
-            ("    → given perfect doorway", 0.785, "#f0a480"),
+            ("§5.9 + reactive bearing", mean[("scatter", "react")], C_REACT),
+            ("    → given perfect obstacles*", 0.674, "#f0a480"),
+            ("    → given perfect doorway*", 0.785, "#f0a480"),
             ("planner on the TRUE map", CEIL, "#5a5a5a")]
     ys = np.arange(len(rows))[::-1]
     for y, (lab, v, colour) in zip(ys, rows):
@@ -202,15 +204,17 @@ def react_clearance():
     axR.set_xlabel("doorway-finding success (cluttered, nobs=3)")
     axR.set_xlim(0, 1.12)
     axR.grid(axis="x", color=GRID, lw=0.7); axR.set_axisbelow(True)
-    axR.annotate("following a DIRECTION costs nothing:\ntrue bearing with NO range = 0.94",
-                 xy=(CEIL, ys[-1] - 0.34), xytext=(0.52, ys[-1] - 1.15),
+    axR.annotate("following a DIRECTION costs nothing: true bearing, NO range = 0.94\n"
+                 "* half-ceilings measured at the older 8-episode resolution (±0.05)",
+                 xy=(CEIL, ys[-1] - 0.34), xytext=(0.52, ys[-1] - 1.25),
                  arrowprops=dict(arrowstyle="->", color="#666", lw=1.2),
-                 color="#444", fontsize=9, style="italic", ha="center")
-    axR.set_ylim(-1.75, len(rows) - 0.4)
-    axR.set_title("Both halves still imperfect — and they compound",
+                 color="#444", fontsize=8.5, style="italic", ha="center")
+    axR.set_ylim(-1.9, len(rows) - 0.4)
+    axR.set_title("Doorway-limited, not obstacle-map-limited",
                   fontsize=10.5, fontweight="bold", loc="left")
 
-    fig.suptitle("EchoRL §5.9 — a bearing is a gradient to follow, not a coordinate to compute",
+    fig.suptitle("EchoRL §5.9 — a bearing is a gradient to follow, not a coordinate to compute\n"
+                 "288 episodes/cell, 3 seeds; effects below ~0.04 are not resolvable",
                  fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     p = os.path.join(OUT, "echorl_react_clearance.png")

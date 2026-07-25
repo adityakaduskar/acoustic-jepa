@@ -325,22 +325,36 @@ class ReactiveBearing:
         self.l_min, self.l_max, self.w_ref = l_min, l_max, w_ref
         self.dir = None          # unit (sx, cz) world direction to the doorway
         self.dist = None
+        self.res = None          # UNnormalized EMA of the unit rays: |res| in [0,1] is
+                                 # the circular mean-resultant length = how concentrated
+                                 # the recent bearings are. Drives the scan anneal (§5.10).
 
-    def update(self, x, z, yaw, dist, beta, w):
-        """dist/beta = this ping's ego range+bearing to the doorway, w = confidence."""
+    def concentration(self):
+        """0 = bearings disagree (scan!), 1 = they agree (commit)."""
+        return 0.0 if self.res is None else float(min(1.0, np.linalg.norm(self.res)))
+
+    def update(self, x, z, yaw, dist, beta, w, scan=0.0):
+        """dist/beta = this ping's ego range+bearing to the doorway, w = confidence.
+        `scan` (rad) rotates only the emitted SUBGOAL, never the internal estimate: the
+        agent looks off-axis to diversify aspect without corrupting what it believes."""
         ang = math.radians(yaw) + beta                       # world angle of the ray
         v = np.array([math.sin(ang), -math.cos(ang)], np.float64)
         a = self.alpha * min(1.0, w / self.w_ref)            # trust-scaled step
         if self.dir is None:
-            self.dir, self.dist = v, dist
+            self.dir, self.dist, self.res = v, dist, v.copy()
         else:
+            self.res = (1 - a) * self.res + a * v
             self.dir = (1 - a) * self.dir + a * v
             n = np.linalg.norm(self.dir)
             self.dir = v if n < 1e-6 else self.dir / n
             ad = self.alpha_d * min(1.0, w / self.w_ref)
             self.dist = (1 - ad) * self.dist + ad * dist
+        d = self.dir
+        if scan:
+            c, s = math.cos(scan), math.sin(scan)
+            d = np.array([c * d[0] - s * d[1], s * d[0] + c * d[1]])
         L = float(np.clip(self.dist, self.l_min, self.l_max))
-        return float(x + L * self.dir[0]), float(z + L * self.dir[1])
+        return float(x + L * d[0]), float(z + L * d[1])
 
 
 @torch.no_grad()
@@ -354,10 +368,27 @@ def egovec_of(model, rng_o, coch_o):
     return float(dist[0]), beta, w
 
 
-# ==================================================================== provider
+# ============================================================ C. active scanning
+def _scan_offset(state, t):
+    """§5.10 fix C: sweep the SUBGOAL off the estimated bearing by +/- scan_deg, so the
+    agent approaches on a zig-zag and sees the doorway from a spread of ASPECTS. The gate
+    (`mapper_active.py`) found aspect diversity -- not translational parallax -- is what
+    the binaural estimate responds to. Annealed by the reactive filter's circular
+    concentration: scan wide while the bearings disagree, commit once they agree (the
+    head-movement schedule a bat uses). scan_deg=0 reproduces §5.9 exactly."""
+    deg = state.get("scan_deg", 0.0)
+    if not deg:
+        return 0.0
+    if state.get("scan_anneal", True):
+        deg *= (1.0 - state["react"].concentration())
+    sign = 1.0 if ((t - 1) // max(1, state.get("scan_period", 1) // 2)) % 2 == 0 else -1.0
+    return math.radians(deg) * sign
+
+
 def make_provider(occ_src, goal_src, occ_model=None, goal_model=None, clear_model=None,
                   thr_scatter=0.5, thr_clear=0.60, w_scatter=1.0, react_kw=None,
-                  directional=True, ego_carve_r=0.35):
+                  directional=True, ego_carve_r=0.35, scan_deg=0.0, scan_period=2,
+                  scan_anneal=True):
     """occ_src in {true, scatter, clear, both}; goal_src in {true, fuse, react, reactfix,
     reacttrue}. `directional` selects the surface-point map update over the isotropic ring."""
     import mapper_fuse
@@ -371,6 +402,9 @@ def make_provider(occ_src, goal_src, occ_model=None, goal_model=None, clear_mode
         def reset():
             state["field"] = ClearField()
             state["react"] = ReactiveBearing(**react_kw)
+            state["scan_deg"] = scan_deg
+            state["scan_period"] = scan_period
+            state["scan_anneal"] = scan_anneal
 
         def step_map(x, z, yaw, history):
             rng_o, coch_o = srv.observe(x, z, yaw)
@@ -425,7 +459,8 @@ def make_provider(occ_src, goal_src, occ_model=None, goal_model=None, clear_mode
                 d, beta, w = egovec_of(goal_model, rng_o, coch_o)
                 if goal_src == "reactfix":
                     d = react_kw.get("l_max", 4.0)         # bearing only, range discarded
-                goal = state["react"].update(x, z, yaw, d, beta, w)
+                goal = state["react"].update(x, z, yaw, d, beta, w,
+                                             scan=_scan_offset(state, len(history)))
             else:                                          # §5.8 known-pose fusion
                 poses = np.array([[h[0], h[1], h[2]] for h in history], np.float32)
                 rseq = np.stack([h[3] for h in history])
@@ -530,7 +565,8 @@ def cmd_nav(args):
         prov = make_provider(osrc, gsrc, occ_model=occ_model, goal_model=goal_model,
                              clear_model=clear_model, thr_clear=args.thr_clear,
                              react_kw=react_kw, directional=args.directional,
-                             ego_carve_r=args.ego_carve)
+                             ego_carve_r=args.ego_carve, scan_deg=args.scan_deg,
+                             scan_period=args.scan_period, scan_anneal=not args.no_anneal)
         t0 = time.time()
         macro, per = run_map_nav(prov, seeds, nobs=args.nobs, episodes_per=args.episodes_per,
                                  t_max=args.t_max)
@@ -584,6 +620,12 @@ def main():
     n.add_argument("--l-max", type=float, default=4.0)
     n.add_argument("--ego-carve", type=float, default=0.35,
                    help="radius (m) around the agent forced free in the planning map")
+    n.add_argument("--scan-deg", type=float, default=0.0,
+                   help="§5.10 fix C: sweep the subgoal +/- this many degrees off the "
+                        "estimated bearing (0 = §5.9 exactly)")
+    n.add_argument("--scan-period", type=int, default=2, help="steps per full scan cycle")
+    n.add_argument("--no-anneal", action="store_true",
+                   help="do NOT shrink the scan as the bearing estimate concentrates")
     n.set_defaults(func=cmd_nav, directional=True)
 
     args = ap.parse_args()
