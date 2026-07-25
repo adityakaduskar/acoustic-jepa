@@ -33,12 +33,18 @@ DEV = mapper.DEV
 
 
 # ------------------------------------------------------------------- model
+def ears_of(state_dict):
+    """Recover the ear count from a checkpoint: coch_proj.0.weight is [emb, ears*emb/2]."""
+    w = state_dict["enc.coch_proj.0.weight"]
+    return int(w.shape[1] // (w.shape[0] // 2))
+
+
 class EgoVecNet(nn.Module):
     """(range,coch) -> per-ping ego (dist, sin b, cos b) to a target + log-variances.
-    Confidence = exp(-logvar) weights the fusion."""
-    def __init__(self):
+    Confidence = exp(-logvar) weights the fusion. `ears`=4 is the §5.11 non-collinear array."""
+    def __init__(self, ears=2):
         super().__init__()
-        self.norm = Normalizer(); self.enc = TwoStreamEncoder(128, 128)
+        self.norm = Normalizer(); self.enc = TwoStreamEncoder(128, 128, ears=ears)
         self.head = nn.Sequential(nn.Linear(256, 256), nn.GELU(), nn.Linear(256, 5))
         # outputs: dist, bsin, bcos, logvar_dist, logvar_bear
 
@@ -52,7 +58,11 @@ class EgoVecNet(nn.Module):
 
 
 # ------------------------------------------------------------------- data
-def build_samples(eps, target="goal"):
+def build_samples(eps, target="goal", ear_idx=None):
+    """ear_idx selects cochleagram channels: None = all, (0,1) = the original head,
+    (2,3) = the +90 deg rotated head (§5.11). Training a net on (2,3) alone tests whether
+    the second pair carries usable bearing at all -- i.e. whether a null 4-ear result means
+    'no extra information' or 'the net failed to exploit it'."""
     R, C, POSE, D, BS, BC = [], [], [], [], [], []
     for e in eps:
         gx, gz = goal_from_openings(e["openings"])
@@ -63,7 +73,8 @@ def build_samples(eps, target="goal"):
                 tx, tz = gx, gz
             else:
                 _, pc = nearest_pillar(px, pz, obs); tx, tz = pc if pc else (0.0, 0.0)
-            R.append(e["range"][t]); C.append(e["coch"][t]); POSE.append([px, pz, pyaw])
+            ct = e["coch"][t] if ear_idx is None else e["coch"][t][list(ear_idx)]
+            R.append(e["range"][t]); C.append(ct); POSE.append([px, pz, pyaw])
             b = ego_bearing(px, pz, pyaw, tx, tz)
             D.append(math.hypot(px - tx, pz - tz)); BS.append(math.sin(b)); BC.append(math.cos(b))
     return (np.array(R, np.float32), np.stack(C).astype(np.float32), np.array(POSE, np.float32),
@@ -94,9 +105,11 @@ def train(args):
     rng = np.random.default_rng(0); perm = rng.permutation(len(eps))
     nval = max(8, int(0.1 * len(eps)))
     tr = [eps[i] for i in perm[nval:]]; va = [eps[i] for i in perm[:nval]]
-    Rtr, Ctr, Ptr, Dtr, BStr, BCtr = build_samples(tr, args.target)
-    print(f"[{args.target}] train steps {len(Rtr)}  val eps {len(va)}")
-    m = EgoVecNet().to(DEV)
+    ear_idx = None if not getattr(args, "ear_idx", "") else tuple(int(v) for v in args.ear_idx.split(","))
+    Rtr, Ctr, Ptr, Dtr, BStr, BCtr = build_samples(tr, args.target, ear_idx)
+    ears = Ctr.shape[1]
+    print(f"[{args.target}] train steps {len(Rtr)}  val eps {len(va)}  ears={ears}")
+    m = EgoVecNet(ears=ears).to(DEV)
     opt = torch.optim.AdamW(m.parameters(), args.lr, weight_decay=1e-4)
     dmu, dsd = float(Dtr.mean()), float(Dtr.std() + 1e-6)
     N = len(Rtr); bs = 512
@@ -118,7 +131,7 @@ def train(args):
             loss = loss_d + loss_b
             opt.zero_grad(); loss.backward(); opt.step()
         # val: fused localization error vs #pings
-        gerr = eval_fusion(m, va, args.target, ks=(args.t_max,))
+        gerr = eval_fusion(m, va, args.target, ks=(args.t_max,), ear_idx=ear_idx)
         e_full = gerr[args.t_max]
         tag = ""
         if e_full < best:
@@ -131,9 +144,10 @@ def train(args):
 
 
 @torch.no_grad()
-def eval_fusion(model, eps, target="goal", ks=(2, 5, 10, 20, 40)):
+def eval_fusion(model, eps, target="goal", ks=(2, 5, 10, 20, 40), ear_idx=None):
     model.eval()
     errs = {k: [] for k in ks}
+    sel = (lambda c: c) if ear_idx is None else (lambda c: c[:, list(ear_idx)])
     for e in eps:
         gx, gz = goal_from_openings(e["openings"])
         obs = ear_height_obstacles(e["obstacles"])
@@ -141,7 +155,7 @@ def eval_fusion(model, eps, target="goal", ks=(2, 5, 10, 20, 40)):
         for k in ks:
             kk = min(k, T)
             gxh, gzh = fuse(model, e["poses"][:kk], e["range"][:kk].astype(np.float32),
-                            e["coch"][:kk].astype(np.float32))
+                            sel(e["coch"][:kk].astype(np.float32)))
             if target == "goal":
                 errs[k].append(math.hypot(gxh - gx, gzh - gz))
             else:
@@ -153,11 +167,12 @@ def eval_fusion(model, eps, target="goal", ks=(2, 5, 10, 20, 40)):
 def cmd_evalq(args):
     from ppo import opening_seeds
     import mapper_collect
-    m = EgoVecNet().to(DEV); m.load_state_dict(torch.load(args.ckpt, map_location=DEV)); m.eval()
+    sd = torch.load(args.ckpt, map_location=DEV); ears = ears_of(sd)
+    m = EgoVecNet(ears=ears).to(DEV); m.load_state_dict(sd); m.eval()
     seeds = opening_seeds(600, args.eval_rooms, args.nobs)
-    print(f"Collecting held-out eval trajectories ({len(seeds)} rooms)...")
+    print(f"Collecting held-out eval trajectories ({len(seeds)} rooms, ears={ears})...")
     eps = mapper_collect.collect(seeds, args.ep_per_room, nobs=args.nobs, t_max=args.t_max,
-                                 workers=min(12, len(seeds)), base_seed=99)
+                                 workers=min(12, len(seeds)), base_seed=99, ears=ears)
     ks = (1, 2, 5, 10, 20, args.t_max)
     gerr = eval_fusion(m, eps, args.target, ks=ks)
     print(f"\nFused {args.target}-localization error vs #pings (held-out nobs={args.nobs}, "
@@ -177,6 +192,7 @@ def main():
     p.add_argument("--epochs", type=int, default=25)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--t-max", type=int, default=40)
+    p.add_argument("--ear-idx", default="", help="e.g. '2,3' to train on the rotated pair only")
     p.set_defaults(func=train)
     q = sub.add_parser("evalq")
     q.add_argument("--ckpt", default="echorl/ckpt/egovec_goal_nobs3.pt")

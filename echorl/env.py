@@ -41,9 +41,14 @@ DISCRETE_DSTEP = 0.75
 class EpisodeServer:
     """One episode_server.exe process == one room. Parses the extended handshake."""
 
-    def __init__(self, seed, nobs=3, threads=0):
-        self.seed, self.nobs, self.threads = seed, nobs, threads
-        self.p = subprocess.Popen([EXE, str(seed), str(nobs), str(threads)],
+    def __init__(self, seed, nobs=3, threads=0, ears=2):
+        # ears=4 (§5.11) decodes the ambisonic field through a SECOND head yawed +90 deg,
+        # giving a non-collinear array whose second pair breaks the first pair's front-back
+        # cone of confusion. ears=2 is the default and is byte-identical to every earlier §5.
+        self.seed, self.nobs, self.threads, self.ears = seed, nobs, threads, ears
+        self.coch_shape = (ears, COCH_SHAPE[1], COCH_SHAPE[2])
+        self.nc = RANGE_BINS + int(np.prod(self.coch_shape))
+        self.p = subprocess.Popen([EXE, str(seed), str(nobs), str(threads), str(ears)],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE)
         r = self.p.stdout
@@ -55,18 +60,18 @@ class EpisodeServer:
 
     def observe(self, x, z, yaw):
         self.p.stdin.write(struct.pack("<3f", float(x), float(z), float(yaw))); self.p.stdin.flush()
-        buf = self.p.stdout.read(NC * 4)
-        if len(buf) < NC * 4:                          # short read == server exited
+        buf = self.p.stdout.read(self.nc * 4)
+        if len(buf) < self.nc * 4:                     # short read == server exited
             code = self.p.poll()
             err = b""
             try:
                 err = self.p.stderr.read() if self.p.stderr else b""
             except Exception:
                 pass
-            raise RuntimeError(f"episode_server(seed={self.seed}) died: got {len(buf)}/{NC*4} bytes, "
+            raise RuntimeError(f"episode_server(seed={self.seed}) died: got {len(buf)}/{self.nc*4} bytes, "
                                f"exit={code}, req=({x:.3f},{z:.3f},{yaw:.3f}), stderr={err[:400]!r}")
         a = np.frombuffer(buf, dtype=np.float32)
-        return a[:RANGE_BINS].copy(), a[RANGE_BINS:].reshape(COCH_SHAPE).copy()
+        return a[:RANGE_BINS].copy(), a[RANGE_BINS:].reshape(self.coch_shape).copy()
 
     def close(self):
         try:
@@ -138,7 +143,7 @@ class Discrete:
 class EchoLocEnv:
     def __init__(self, seed_pool=(1,), action_mode="continuous", nobs=3, sim_threads=0,
                  t_max=60, start_margin=0.8, resample_room_every=0, reward_cfg=None, base_seed=0,
-                 task="avoid", goal_radius=1.2, cell=1.0):
+                 task="avoid", goal_radius=1.2, cell=1.0, ears=2):
         assert action_mode in ("continuous", "discrete")
         assert task in ("avoid", "goal", "explore")
         self.task, self.goal_radius = task, goal_radius   # "goal": home to the room's opening
@@ -146,6 +151,7 @@ class EchoLocEnv:
         self.seed_pool = list(seed_pool)
         self.action_mode = action_mode
         self.nobs, self.sim_threads = nobs, sim_threads
+        self.ears = ears                                   # 4 = non-collinear array (§5.11)
         self.t_max, self.start_margin = t_max, start_margin
         self.resample_room_every = resample_room_every
         self.rng = np.random.default_rng(base_seed)
@@ -201,7 +207,7 @@ class EchoLocEnv:
         for k in range(tries):
             seed = self.seed_pool[self._room_ptr % len(self.seed_pool)]
             self._room_ptr += 1
-            srv = EpisodeServer(seed, self.nobs, self.sim_threads)
+            srv = EpisodeServer(seed, self.nobs, self.sim_threads, ears=self.ears)
             if self.task != "goal" or len(srv.openings) > 0 or k == tries - 1:
                 self.srv = srv
                 return
@@ -256,7 +262,7 @@ class EchoLocEnv:
                     self.srv.close()
                 except Exception:
                     pass
-                self.srv = EpisodeServer(seed, self.nobs, self.sim_threads)
+                self.srv = EpisodeServer(seed, self.nobs, self.sim_threads, ears=self.ears)
         return (np.zeros(RANGE_BINS, np.float32), np.zeros(COCH_SHAPE, np.float32))
 
     def _obs(self, x, z, yaw, last_dyaw, last_dstep):

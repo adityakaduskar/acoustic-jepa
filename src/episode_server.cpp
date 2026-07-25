@@ -23,9 +23,12 @@
 //    REQUEST  : 3 x float32 = (x, z, yaw_deg)   [y fixed at ear height 1.6]
 //               x = NaN  => quit.
 //    RESPONSE : RANGE_BINS float32 (matched-filter range profile)
-//               then 2*COCH_F*COCH_T float32 (binaural cochleagram) = 256 + 6144 = 6400.
+//               then nEars*COCH_F*COCH_T float32 (cochleagram).
+//               nEars=2 (default): 256 + 6144 = 6400  -- byte-identical to v2, so every
+//               existing pipeline is untouched. nEars=4 (§5.11): 256 + 12288 = 12544,
+//               ears 0-1 = head at yaw, ears 2-3 = head at yaw+90 (non-collinear array).
 //
-//  Usage:  episode_server <seed> [nObstacles=3] [simThreads=0(all cores)]
+//  Usage:  episode_server <seed> [nObstacles=3] [simThreads=0(all cores)] [nEars=2]
 // ---------------------------------------------------------------------------
 #include "acoustic_env.h"
 #include <cmath>
@@ -44,11 +47,12 @@ int main(int argc, char** argv) {
     uint32_t seed       = argc > 1 ? (uint32_t)std::strtoul(argv[1], nullptr, 10) : 1u;
     int      nObstacles = argc > 2 ? (int)std::strtol(argv[2], nullptr, 10) : 3;
     int      simThreads = argc > 3 ? (int)std::strtol(argv[3], nullptr, 10) : 0;   // 0 => all cores
+    int      nEars      = argc > 4 ? (int)std::strtol(argv[4], nullptr, 10) : 2;   // 2 or 4
 #if defined(_WIN32)
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
-    AcousticEnv env; env.init(simThreads);
+    AcousticEnv env; env.init(simThreads); env.set_ears(nEars);
     BoxRoom rm = make_box_room(seed, nObstacles);
     env.set_room(rm);
 
@@ -73,14 +77,15 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
 
     // ---- observation loop (identical to observe_server) ----
-    const int NC = RANGE_BINS + 2 * COCH_F * COCH_T; // 6400
+    const int NE = (nEars == 4) ? 4 : 2;
+    const int NC = RANGE_BINS + NE * COCH_F * COCH_T; // 6400 (2 ears) / 12544 (4 ears)
     std::vector<float> outbuf(NC);
     float req[3];
     while (std::fread(req, sizeof(float), 3, stdin) == 3) {
         if (std::isnan(req[0])) break;               // quit sentinel
         Obs o = env.observe(V(req[0], 1.6f, req[1]), req[2]);
         std::memcpy(&outbuf[0], o.range, RANGE_BINS * sizeof(float));
-        std::memcpy(&outbuf[RANGE_BINS], o.coch, 2 * COCH_F * COCH_T * sizeof(float));
+        std::memcpy(&outbuf[RANGE_BINS], o.coch, (size_t)NE * COCH_F * COCH_T * sizeof(float));
         std::fwrite(outbuf.data(), sizeof(float), NC, stdout);
         std::fflush(stdout);
     }

@@ -22,8 +22,10 @@ breaks part of that ceiling *without touching either estimator's accuracy* — c
 binaural bearing **reactively** rather than as a fused coordinate is worth +0.063 ± 0.024, taking
 the task to **0.52** against a 0.95 ceiling (its companion clearance-map fix measured nil once
 re-run at 3× the episodes, and a claimed interaction between them is **retracted** — see the
-correction in §5.9); and **§5.10**, active sensing: a head-scan halves the doorway bearing error
-(83.9° → 44.6°) and buys no measurable control. All numbers
+correction in §5.9); **§5.10**, active sensing: a head-scan halves the doorway bearing error
+(83.9° → 44.6°) and buys no measurable control; and **§5.11**, which builds the 4-receiver array
+that was supposed to fix the doorway floor and finds it does not — the front-back ambiguity blamed
+since §5.8 turns out to explain a minority of the error. All numbers
 are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the 3000+
 corpus band). Trajectory maps for every condition: `results/echorl_{avoid,goal}_nobs{0,3}.png`
 (task × clutter; columns = controllers, green = success, red = failure).
@@ -895,6 +897,76 @@ estimator 2.84→2.04 m, 0.49→0.29), the AcousticJEPA headline, and now −39�
 +0.024 ± 0.013 of success. The corrected §5.9 above is arguably a fifth: B improved pillar-IoU
 10× for nothing.
 
+### 5.11 More microphones (fix D) — the front-back hypothesis, measured and mostly wrong
+Since §5.8 this log has carried a *hypothesis* for the 2.8 m doorway-fusion floor: a 2-mic head
+has ITD/ILD symmetric about its interaural axis, so a single ping cannot separate a source ahead
+from its mirror image behind; the resulting errors are two-valued and therefore correlated across
+poses, which is why averaging saturates. §5.9 and §5.10 both leaned on that story. It had never
+been measured. This section builds the sensor that would fix it and measures it.
+Code: `src/{acoustic_env.h,episode_server.cpp}` (`--ears 4`), `echorl/mapper_ears.py`.
+
+**The array.** `episode_server --ears 4` decodes the *same* order-3 ambisonic field a second time
+through a head yawed +90°, so ears 2-3 have an interaural axis perpendicular to ears 0-1 — two
+crossed binaural heads, i.e. a non-collinear 4-receiver array. Cost: one extra ambisonics decode,
+negligible against the reflection sim. `--ears 2` remains the default and is byte-identical to
+every earlier §5 result (verified: 2-ear output differs from the 4-ear run's first pair only at
+render-jitter scale). The comparison is exactly **paired**: the corpus policy is a pure RNG, so at
+a fixed seed both sensors visit the same poses in the same rooms.
+
+**Open loop — the array works, the hypothesis doesn't** (36 held-out trajectories, paired). A ping
+counts as **mirrored** when the front-back-flipped hypothesis (β → π−β) fits the truth *better*
+than the true bearing — a direct measurement of the cone of confusion, not the `err > 90°` proxy
+that would conflate a flip with noise on a near-lateral target:
+
+| | 2-ear head | 4-ear array | Δ |
+|---|---|---|---|
+| per-ping bearing MAE | 40.9° | 41.0° | +0.1 |
+| **mirrored (cone of confusion)** | **22.8 %** | **22.1 %** | **−0.7** |
+| residual MAE, non-mirrored pings | 28.1° | 26.8° | −1.3 |
+| fused doorway floor (40 pings) | 3.03 m | 2.76 m | −0.27 |
+
+Doubling the array did **not** reduce the flip rate, and moved the fusion floor by 0.27 m against
+the ~1.6 m that separates it from the 1.2 m goal radius.
+
+**Ruling out "the net ignored the new channels."** Nets trained on each pair *alone* both work
+(fused error 3.05 m for ears 0-1, **2.85 m for ears 2-3** — the rotated head is the *better*
+doorway sensor), so the second pair genuinely carries bearing. The discriminating test is whether
+the two pairs — whose cones of confusion are **perpendicular** — flip on the same pings:
+
+| | |
+|---|---|
+| P(pair 0-1 mirrored) | 24.7 % |
+| P(pair 2-3 mirrored) | 17.2 % |
+| P(both mirrored) | **10.6 %** |
+| if independent | 4.3 % |
+| **lift over independence** | **×2.50** |
+
+Independent flips (lift ×1) would mean the ambiguity is geometric and a 4-mic array resolves it;
+coincident flips (lift ×4.0 here, the fully-dependent bound) would mean array shape is irrelevant.
+The measured ×2.50 sits about halfway: **roughly half the flip co-occurrence is common-cause**.
+And pair 2-3 mirrors *less* (17.2 % vs 24.7 %) even though front-back is precisely the axis it
+should be strong on — so the geometric effect is real, just small.
+
+**Closed loop — no gain** (true occupancy isolates the doorway half; 288 episodes):
+**2-ear 0.677 → 4-ear 0.635.** Slightly worse, within/near this eval's ≈0.04 resolution: **no
+measurable conversion**, exactly as §5.10's threshold argument predicts (0.27 m of a 1.6 m gap
+cannot cross a 1.2 m radius). A **fifth** static-decodability ≠ control instance.
+
+**Verdict, and a partial retraction.** The 2.8 m doorway floor is **not a 2-mic hardware limit**.
+The front-back ambiguity invoked since §5.8 is real but explains a minority of the error; the
+dominant term is **scene-acoustic** — in a cluttered reverberant box the doorway's direction is
+often simply not present in a single ping at that pose, and no array geometry recovers what was
+never encoded. §5.8's "likely the binaural front-back bearing ambiguity" was a plausible untested
+hypothesis and should be read as partially superseded here.
+
+**Caveat — what was *not* tested.** All four receivers are decodes of the field at a **single
+point**: crossed directivity patterns, not spatially separated microphones. This is the right test
+for the cone of confusion (an HRTF/directivity property) but it does **not** test time-of-arrival
+disambiguation across a physical baseline, which is how a real distributed array localizes. A
+genuinely displaced 4-mic array remains the untested variant — though the pairs test above is
+evidence about the *scene* rather than the sensor, so its prospects are modest. Also: one 4-ear
+net, no seed repeats, so the closed-loop −0.042 confounds sensor with model seed.
+
 ## 6. Summary of findings
 
 1. **Echo-only avoidance is "solved," but degenerately — PPO learns to STOP** (§3.4.1). It
@@ -987,6 +1059,21 @@ estimator 2.84→2.04 m, 0.49→0.29), the AcousticJEPA headline, and now −39�
     the reactive consumer is the whole result, the task is doorway-limited rather than
     obstacle-map-limited, and B's real 10× pillar-IoU gain is too small in absolute terms to change
     a planner decision.
+12. **The doorway floor is NOT a 2-mic hardware limit, and §5.8's front-back story is mostly
+    wrong (§5.11).** A non-collinear 4-receiver array (the same order-3 ambisonic field decoded
+    through a second head yawed 90°) leaves the **front-back flip rate unchanged: 22.8 % → 22.1 %**,
+    per-ping bearing MAE unchanged (40.9° → 41.0°), and moves the fused doorway floor only
+    3.03 → 2.76 m — against the ~1.6 m that separates it from the 1.2 m goal radius. Closed loop:
+    **0.677 → 0.635, no measurable gain** (a *fifth* static ≠ control instance). It is not that the
+    net ignored the channels: nets trained on each pair alone both work, and the rotated pair is the
+    *better* doorway sensor (2.85 m vs 3.05 m). The discriminating test is that the two pairs, whose
+    cones of confusion are **perpendicular**, flip on the same pings at **×2.50 the independent
+    rate** — about half the co-occurrence is common-cause. So the ambiguity is real but minor; the
+    dominant term is **scene-acoustic**: in a cluttered reverberant box the doorway direction is
+    often simply not in the ping, and no array geometry recovers what was never encoded. Caveat:
+    all four receivers sit at one point (crossed directivity, not a spatial baseline), so
+    time-of-arrival disambiguation across a displaced array remains untested.
+
 11. **Active sensing improves the percept a lot and the control not at all (§5.10) — a fourth
     instance of static ≠ control.** An oracle-motion gate shows the doorway estimate responds to
     **aspect** diversity, not translational parallax: scanning beats maximum-parallax orbiting,
@@ -1077,6 +1164,13 @@ python echorl/mapper_react.py nav --ego-carve 0 --episodes-per 24 \
 python echorl/mapper_active.py gate --eval-rooms 12 --ep-per-room 3   # the motion-policy gate
 python echorl/mapper_react.py nav --ego-carve 0 --episodes-per 24 --scan-deg 30 --modes both+react
 #     scan-deg 0 == §5.9 exactly; 30 deg scores +0.024 +/- 0.013 (below resolution).
+# 4-receiver array (§5.11, fix D) -- needs the rebuilt server (src/build.bat):
+python echorl/mapper_collect.py --rooms 300 --ep-per-room 3 --ears 4 --out echorl/mapper_corpus_nobs3_e4.pkl
+python echorl/mapper_fuse.py train --corpus echorl/mapper_corpus_nobs3_e4.pkl --target goal   --out echorl/ckpt/egovec_goal_nobs3_e4.pt
+python echorl/mapper_ears.py compare       # paired 2-ear vs 4-ear: flips 22.8% -> 22.1% (nil)
+python echorl/mapper_fuse.py train --corpus echorl/mapper_corpus_nobs3_e4.pkl --ear-idx 0,1   --out echorl/ckpt/egovec_goal_nobs3_pair01.pt          # and --ear-idx 2,3 -> ..._pair23.pt
+python echorl/mapper_ears.py pairs         # geometric or acoustic? lift x2.50 => mostly acoustic
+python echorl/mapper_react.py nav --ears 4 --goal-ckpt echorl/ckpt/egovec_goal_nobs3_e4.pt   --episodes-per 24 --ego-carve 0 --modes true+react     # closed loop: 0.635 vs 2-ear 0.677
 # Redesigned coverage/explore task (§3.6) + its cue ablation (§3.6.1):
 python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag cover
 python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag nomem --no-memory

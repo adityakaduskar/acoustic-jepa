@@ -66,19 +66,19 @@ class RangeCNN(nn.Module):
 class TwoStreamEncoder(nn.Module):
     """coch[B,2,64,48] + range[B,256] -> block latent (z_range, z_coch)."""
 
-    def __init__(self, emb_range: int = 128, emb_coch: int = 128):
+    def __init__(self, emb_range: int = 128, emb_coch: int = 128, ears: int = 2):
         super().__init__()
         self.range_tower = RangeCNN(emb_range)
         self.range_proj = nn.Sequential(nn.Linear(emb_range, emb_range), _gn1d(emb_range), nn.GELU(),
                                         nn.Linear(emb_range, emb_range))
+        self.ears = ears                       # 4 = the §5.11 non-collinear array
         self.ear = EarCNN(emb_coch // 2)       # per-ear tower, weights shared across ears
-        self.coch_proj = nn.Sequential(nn.Linear(emb_coch, emb_coch), _gn1d(emb_coch), nn.GELU(),
-                                       nn.Linear(emb_coch, emb_coch))
+        self.coch_proj = nn.Sequential(nn.Linear(ears * (emb_coch // 2), emb_coch), _gn1d(emb_coch),
+                                       nn.GELU(), nn.Linear(emb_coch, emb_coch))
 
     def forward(self, coch, rng):
         zr = self.range_proj(self.range_tower(rng))
-        l = self.ear(coch[:, 0:1]); r = self.ear(coch[:, 1:2])
-        zc = self.coch_proj(torch.cat([l, r], dim=1))
+        zc = self.coch_proj(torch.cat([self.ear(coch[:, e:e + 1]) for e in range(coch.shape[1])], 1))
         return zr, zc
 
 

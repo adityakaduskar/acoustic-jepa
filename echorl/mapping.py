@@ -147,7 +147,7 @@ def _true_swept_hit_scalar(x0, z0, x1, z1, Lx, Lz, obs, n=8):
 
 
 def run_map_nav(occ_provider, seeds, nobs=3, episodes_per=10, t_max=40,
-                goal_radius=1.2, start_margin=0.8, base_seed=100, verbose=False):
+                goal_radius=1.2, start_margin=0.8, base_seed=100, verbose=False, ears=2):
     """Closed-loop goal-task eval driven by a MAP-based planner. `occ_provider(srv)`
     returns a callable step_map(x,z,yaw,history) -> (occ_infl, goal_est): the map and
     goal the planner uses THIS step (M0 = constant true map; M2 = mapper re-run on the
@@ -156,7 +156,7 @@ def run_map_nav(occ_provider, seeds, nobs=3, episodes_per=10, t_max=40,
     from ppo import opening_seeds  # local import to avoid cycle at module load
     succ, per_room = [], {}
     for s in seeds:
-        srv = EpisodeServer(s, nobs, threads=0)
+        srv = EpisodeServer(s, nobs, threads=0, ears=ears)
         Lx, Lz = srv.Lx, srv.Lz
         obs_aabb = ear_height_obstacles(srv.obstacles)
         goal_true = goal_from_openings(srv.openings)

@@ -30,9 +30,22 @@ class Normalizer(nn.Module):
         self.register_buffer("c_std", torch.tensor(d["coch_std"], dtype=torch.float32))
         self.eps = eps
 
+    def _coch_stats(self, coch):
+        """Stats were computed on a 2-ear head. With the §5.11 4-ear array the second
+        pair is the SAME field decoded through a head yawed 90 deg, so its per-band
+        statistics are near-identical -- tile rather than demand a new stats file. Any
+        residual scale error is absorbed by the first linear layer."""
+        ne = coch.shape[1]
+        m, sd = self.c_mean, self.c_std
+        if m.shape[0] != ne:
+            rep = ne // m.shape[0]
+            m, sd = m.repeat(rep, 1, 1), sd.repeat(rep, 1, 1)
+        return m, sd
+
     def forward(self, rng, coch):
         rn = (rng - self.r_mean) / (self.r_std + self.eps)
-        cn = (coch - self.c_mean) / (self.c_std + self.eps)
+        m, sd = self._coch_stats(coch)
+        cn = (coch - m) / (sd + self.eps)
         return rn, cn
 
 

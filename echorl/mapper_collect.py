@@ -42,7 +42,7 @@ def _run_episode(env, rng, t_max, forward_bias):
                 range=np.stack(rngs), coch=np.stack(cochs))
 
 
-def collect(seeds, ep_per_room, nobs=3, t_max=40, forward_bias=0.6, workers=12, base_seed=7):
+def collect(seeds, ep_per_room, nobs=3, t_max=40, forward_bias=0.6, workers=12, base_seed=7, ears=2):
     from concurrent.futures import ThreadPoolExecutor
     workers = min(workers, max(1, len(seeds)))
     shards = [seeds[i::workers] for i in range(workers)]
@@ -54,7 +54,7 @@ def collect(seeds, ep_per_room, nobs=3, t_max=40, forward_bias=0.6, workers=12, 
         for si, seed in enumerate(sh):
             env = EchoLocEnv(seed_pool=[seed], action_mode="continuous", nobs=nobs, sim_threads=2,
                              t_max=t_max, resample_room_every=0, task="goal",
-                             base_seed=base_seed * 100000 + wi * 1000 + si)
+                             base_seed=base_seed * 100000 + wi * 1000 + si, ears=ears)
             rng = np.random.default_rng(base_seed * 100000 + wi * 1000 + si)
             for _ in range(ep_per_room):
                 try:
@@ -78,13 +78,16 @@ def main():
     ap.add_argument("--start-seed", type=int, default=3000, help="room-seed band (disjoint from eval 600+)")
     ap.add_argument("--out", default="echorl/mapper_corpus_nobs3.pkl")
     ap.add_argument("--workers", type=int, default=12)
+    ap.add_argument("--ears", type=int, default=2, choices=[2, 4],
+                    help="4 = the §5.11 non-collinear array (second head yawed 90 deg)")
     args = ap.parse_args()
 
     seeds = opening_seeds(args.start_seed, args.rooms, args.nobs)
     print(f"Collecting mapping corpus: {len(seeds)} opening-rooms x {args.ep_per_room} eps "
           f"(nobs={args.nobs}, t_max={args.t_max}), seeds {seeds[0]}..{seeds[-1]}")
     t0 = time.time()
-    eps = collect(seeds, args.ep_per_room, nobs=args.nobs, t_max=args.t_max, workers=args.workers)
+    eps = collect(seeds, args.ep_per_room, nobs=args.nobs, t_max=args.t_max, workers=args.workers,
+                  ears=args.ears)
     dt = time.time() - t0
     nsteps = sum(len(e["poses"]) for e in eps)
     print(f"  {len(eps)} episodes, {nsteps} steps in {dt:.1f}s ({nsteps/dt:.0f} obs/s)")

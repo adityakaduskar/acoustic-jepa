@@ -54,10 +54,22 @@ static const int   RANGE_BINS = 256;              // output lag-profile length
 static const int   RANGE_POOL = 16;               // samples/bin (@48kHz -> ~5.7cm/bin one-way)
 static const int   RANGE_GUARD = 96;               // 2ms: clears the self-cancel residual skirt
 
+// v3 (EchoRL §5.11): optional 4-RECEIVER head. Every §5 result up to §5.10 used a
+// 2-ear head, whose ITD/ILD are symmetric about the interaural axis -- the classic
+// front-back CONE OF CONFUSION. That makes a single-ping bearing two-valued, which
+// §5.8 traced to the 2.8 m doorway-fusion floor (errors correlated across poses, so
+// averaging cannot remove them). The fix is a NON-COLLINEAR array: decode the SAME
+// ambisonic field a second time through a head rotated +90 deg, giving ears 2-3 whose
+// interaural axis is perpendicular to ears 0-1. A source ambiguous front/back for the
+// first pair is left/right-distinct for the second, so the pair of pairs disambiguates.
+// Physically realizable (two 2-mic arrays at right angles); costs one extra ambisonics
+// decode, negligible against the reflection sim that dominates the 25 ms budget.
+static const int   MAX_EARS = 4;
 struct Obs {
-    float coch [2 * COCH_F * COCH_T];              // [ear, band, frame], log energy
-    float raw  [2 * RAW_N];                         // [ear, sample], cropped binaural
+    float coch [MAX_EARS * COCH_F * COCH_T];       // [ear, band, frame], log energy
+    float raw  [MAX_EARS * RAW_N];                  // [ear, sample], cropped binaural
     float range[RANGE_BINS];                        // v2: matched-filter lag-domain profile (log energy)
+    int   nEars = 2;                                // 2 = the v2 head; 4 = the crossed pair
 };
 struct Label {
     float dist_wall[8];   // GT range to a wall in 8 yaw sectors (rel. heading), m
@@ -514,6 +526,7 @@ struct AcousticEnv {
     // Unset => monostatic (source == listener), the original behaviour.
     IPLVector3 beacon{ 0, 0, 0 };
     bool       has_beacon = false;
+    int        nEars = 2;                 // 2 = v2 head; 4 = crossed pair (see Obs)
     void set_beacon(IPLVector3 p) { beacon = p; has_beacon = true; }
     void clear_beacon() { has_beacon = false; }
 
@@ -599,34 +612,46 @@ struct AcousticEnv {
             inF[0] = 0.f;
         }
 
-        // binaural decode with the head orientation
-        iplAmbisonicsDecodeEffectReset(dec);
-        IPLAmbisonicsDecodeEffectParams dp{}; dp.order = ORDER; dp.hrtf = hrtf; dp.orientation = hf; dp.binaural = IPL_TRUE;
+        // binaural decode with the head orientation. With nEars==4 the SAME ambisonic
+        // field is decoded a second time through a head yawed +90 deg (`hf90`), so the
+        // second pair's interaural axis is perpendicular to the first's -- see the Obs
+        // comment on the cone of confusion.
+        Obs o{}; o.nEars = nEars;
+        const int nPairs = (nEars == 4) ? 2 : 1;
         std::vector<std::vector<float>> iF(AMBI, std::vector<float>(FRAME)); std::vector<float*> iP(AMBI);
         for (int c = 0; c < AMBI; ++c) iP[c] = iF[c].data(); IPLAudioBuffer iB{ AMBI, FRAME, iP.data() };
         std::vector<float> l(FRAME), r(FRAME); float* bP[2] = { l.data(), r.data() }; IPLAudioBuffer bB{ 2, FRAME, bP };
-        std::vector<float> binL(TOTAL, 0.f), binR(TOTAL, 0.f);
-        for (int p = 0; p < TOTAL; p += FRAME) {
-            for (int c = 0; c < AMBI; ++c) for (int i = 0; i < FRAME; ++i) { int idx = p + i; iF[c][i] = idx < TOTAL ? ambi[c][idx] : 0.f; }
-            iplAmbisonicsDecodeEffectApply(dec, &dp, &iB, &bB);
-            int cp = std::min(FRAME, TOTAL - p);
-            std::memcpy(&binL[p], l.data(), cp * sizeof(float));
-            std::memcpy(&binR[p], r.data(), cp * sizeof(float));
+        for (int pair = 0; pair < nPairs; ++pair) {
+            IPLCoordinateSpace3 orient = (pair == 0) ? hf : headFrame(pose, yawDeg + 90.f);
+            iplAmbisonicsDecodeEffectReset(dec);
+            IPLAmbisonicsDecodeEffectParams dp{}; dp.order = ORDER; dp.hrtf = hrtf;
+            dp.orientation = orient; dp.binaural = IPL_TRUE;
+            std::vector<float> binL(TOTAL, 0.f), binR(TOTAL, 0.f);
+            for (int p = 0; p < TOTAL; p += FRAME) {
+                for (int c = 0; c < AMBI; ++c) for (int i = 0; i < FRAME; ++i) { int idx = p + i; iF[c][i] = idx < TOTAL ? ambi[c][idx] : 0.f; }
+                iplAmbisonicsDecodeEffectApply(dec, &dp, &iB, &bB);
+                int cp = std::min(FRAME, TOTAL - p);
+                std::memcpy(&binL[p], l.data(), cp * sizeof(float));
+                std::memcpy(&binR[p], r.data(), cp * sizeof(float));
+            }
+            // pack observation: crop first RAW_N (0.2 s) + cochleagram + range tower.
+            // Range tower reads ambi[0] (the W / omni ambisonic channel) BEFORE the
+            // binaural decode -- geometry must come off this pre-binaural channel
+            // (see acoustic_env_test below and matched_range.*); the binaural path
+            // carries bearing/material/elevation but not fine range.
+            const int e0 = 2 * pair;
+            for (int i = 0; i < RAW_N; ++i) {
+                o.raw[(size_t)e0 * RAW_N + i]       = binL[i];
+                o.raw[(size_t)(e0 + 1) * RAW_N + i] = binR[i];
+            }
+            coch.apply(&o.raw[(size_t)e0 * RAW_N],       RAW_N, &o.coch[(size_t)e0 * COCH_F * COCH_T]);
+            coch.apply(&o.raw[(size_t)(e0 + 1) * RAW_N], RAW_N, &o.coch[(size_t)(e0 + 1) * COCH_F * COCH_T]);
         }
-
-        // pack observation: crop first RAW_N (0.2 s) + cochleagram + range tower.
-        // Range tower reads ambi[0] (the W / omni ambisonic channel) BEFORE the
-        // binaural decode -- geometry must come off this pre-binaural channel
-        // (see acoustic_env_test below and matched_range.*); the binaural path
-        // carries bearing/material/elevation but not fine range.
-        Obs o{};
-        for (int i = 0; i < RAW_N; ++i) { o.raw[i] = binL[i]; o.raw[RAW_N + i] = binR[i]; }
-        coch.apply(&o.raw[0],     RAW_N, &o.coch[0]);
-        coch.apply(&o.raw[RAW_N], RAW_N, &o.coch[COCH_F * COCH_T]);
         std::vector<float> rawRange = mf.profile(ambi[0]);
         mf.pool_log(rawRange, o.range);
         return o;
     }
+    void set_ears(int n) { nEars = (n == 4) ? 4 : 2; }
 
     // ---- analytic GT labels for the current box room ----
     Label label(IPLVector3 pose, float yawDeg) const { return analytic_label(room, pose, yawDeg); }

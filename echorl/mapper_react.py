@@ -480,8 +480,9 @@ def _load_models(args, need_occ, need_goal, need_clear):
         occ_model = mapper.OccMapper().to(DEV)
         occ_model.load_state_dict(torch.load(args.occ_ckpt, map_location=DEV)); occ_model.eval()
     if need_goal:
-        goal_model = mapper_fuse.EgoVecNet().to(DEV)
-        goal_model.load_state_dict(torch.load(args.goal_ckpt, map_location=DEV)); goal_model.eval()
+        sd = torch.load(args.goal_ckpt, map_location=DEV)
+        goal_model = mapper_fuse.EgoVecNet(ears=mapper_fuse.ears_of(sd)).to(DEV)
+        goal_model.load_state_dict(sd); goal_model.eval()
     if need_clear:
         clear_model = (SurfNet() if args.directional else ClearNet()).to(DEV)
         ck = args.surf_ckpt if args.directional else args.clear_ckpt
@@ -569,7 +570,7 @@ def cmd_nav(args):
                              scan_period=args.scan_period, scan_anneal=not args.no_anneal)
         t0 = time.time()
         macro, per = run_map_nav(prov, seeds, nobs=args.nobs, episodes_per=args.episodes_per,
-                                 t_max=args.t_max)
+                                 t_max=args.t_max, ears=args.ears)
         lo, hi = min(per.values()), max(per.values())
         print(f"  {mode:>14} : {macro:.3f}  [{lo:.2f},{hi:.2f}]   ({time.time()-t0:.0f}s)",
               flush=True)
@@ -624,6 +625,8 @@ def main():
                    help="§5.10 fix C: sweep the subgoal +/- this many degrees off the "
                         "estimated bearing (0 = §5.9 exactly)")
     n.add_argument("--scan-period", type=int, default=2, help="steps per full scan cycle")
+    n.add_argument("--ears", type=int, default=2, choices=[2, 4],
+                   help="§5.11: 4 = non-collinear array (needs a 4-ear goal ckpt)")
     n.add_argument("--no-anneal", action="store_true",
                    help="do NOT shrink the scan as the bearing estimate concentrates")
     n.set_defaults(func=cmd_nav, directional=True)
