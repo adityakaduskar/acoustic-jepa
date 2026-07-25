@@ -5,7 +5,7 @@ that navigates from **binaural echoes only**, in 3D, with physically-rendered
 reverberant acoustics. 3D, rendered-acoustics successor to Mohan & Vanderelst 2020
 (*Training a simulated bat*, SSCI). Design doc: `EchoRL_PLAN.md`.
 
-Status as of **2026-07-24**: Stage 0 (obstacle avoidance) and Stage 2 (goal
+Status as of **2026-07-25**: Stage 0 (obstacle avoidance) and Stage 2 (goal
 approach / doorway-finding) both complete, with oracle ceilings, ablations, and
 multi-seed CIs; a **model-based (CEM-MPC) vs model-free (PPO)** comparison on the doorway
 task (§5), a Δd probe diagnosing the MPC gap (§5.1), an objective-mismatch result where a
@@ -17,7 +17,10 @@ rooms; it collapses and model-based wins when the task requires planning) — an
 **mapping experiment (§5.8)** that implements §5.7's "integrate pings over time" lever
 explicitly — a known-pose occupancy map + planner ≈ **doubles** the latent-WM MPC on the
 cluttered doorway task (0.49 ± 0.08 vs 0.24) but hits a genuine *information* ceiling (weak,
-correlated per-ping geometry: walls mapped, pillars missed, doorway ~2.8 m). All numbers
+correlated per-ping geometry: walls mapped, pillars missed, doorway ~2.8 m); and **§5.9**, which
+breaks part of that ceiling *without touching either estimator's accuracy* — consuming the
+binaural bearing **reactively** and the clearance readout as a **map** takes the same task to
+**0.59 ± 0.04** against a 0.95 perfect-map ceiling. All numbers
 are on **held-out rooms** (seed band 600+, disjoint from training seeds 1–60 and the 3000+
 corpus band). Trajectory maps for every condition: `results/echorl_{avoid,goal}_nobs{0,3}.png`
 (task × clutter; columns = controllers, green = success, red = failure).
@@ -735,6 +738,96 @@ of choice, and the honest close is that the ~2.8→2.0 m doorway floor is genuin
 lowering it further did not buy control.** The gap to the 0.96 perfect-map ceiling is set by the
 perception–control interaction, not by static estimator accuracy.
 
+### 5.9 Changing the CONSUMER of each cue, not its accuracy — the reactive bearing + clearance map
+§5.8 ended with two named causes and an explicit warning against the obvious fix. The doorway
+half saturates at 2.8 m because a 2-mic array cannot resolve front-back from one ping, so the
+per-ping bearing is *two-valued* and its errors are **correlated** across poses — averaging a
+bimodal estimate lands confidently in the empty middle. The obstacle half fails because the
+scatter-CNN gets pillar-IoU ≈0.005, while §5.6's **clearance** readout decodes surface proximity
+at R²=0.95 on real observations and goes unused. And §5.8's recurrent estimator showed that
+making the estimate *more accurate* (2.84→2.04 m) makes control *worse* (0.49→0.29). So this
+section changes **who consumes each signal**, leaving both estimators' accuracy alone.
+Code: `echorl/mapper_react.py`. Figure: `results/echorl_react_clearance.png`.
+
+**A. Reactive bearing goal.** Stop forming a doorway coordinate. Each step, take the current
+ping's ego-bearing, low-pass it *in the world frame* (so the agent's own turning does not smear
+it), and plant a moving SUBGOAL a lookahead ahead of the **current** pose along it; the grid
+planner routes to that subgoal around mapped pillars. Follow the gradient rather than compute
+the address: a 2.8 m coordinate error puts you at the wrong place permanently, whereas a bearing
+re-taken every step self-corrects and a front-back flip costs one step instead of contaminating
+an average. No absolute doorway point is ever accumulated, so the 2.8 m floor cannot bind.
+
+**The reactive form is free — the control that had to be run first.** With the **true** bearing
+and *no range at all* (fixed 4 m lookahead) on the true map: **0.938**, against the true-goal
+planner's **0.948** (12 rooms × 8; both use no learned model, so they are seed-independent).
+Following a direction loses ~0.01. Therefore every point A fails to deliver is bearing-
+*estimation* error, not the reactive scheme — the ceiling is A's to lose.
+
+**B. Clearance-field occupancy.** Feed §5.6's readout to a classical sonar log-odds map instead
+of to the planner's cost (where §5.6 showed it is actively misleading, because CEM reads it
+through corrupted rollouts). At each known pose: carve the disc of radius *c* free (sound — a
+clearance reading asserts nothing is nearer), and add occupied evidence at range *c*. One
+finding from the label distribution changed the design: the corpus' median clearance is only
+**0.41 m** (a random walk hugs walls; AGENT_R=0.3 is the floor), so the textbook **isotropic
+ring** — *"something is 40 cm away, somewhere on this circle"* — is dominated by the wall behind
+the agent and sprays phantom occupancy across the interior, exactly where the pillars are. So
+the evidence is made **directional**: a `SurfNet` predicts the nearest surface *point*
+(dist + bearing), and a Gaussian blob is placed there. Held-out per-ping quality: **dist R²=0.84,
+MAE 8.1 cm, bearing 20.2° MAE** — far sharper than the *doorway* bearing (37–43°, §5.8), because
+the nearest surface is close and dominates the echo.
+
+Open-loop map quality (held-out nobs=3, 24 trajectories, pillar-IoU = occupied cells *inside* the
+true room rectangle — the hard interior obstacles):
+
+| #pings | scatter-CNN | isotropic ring | **directional** | scatter ⊕ directional |
+|---|---|---|---|---|
+| 2  | 0.004 | 0.016 | 0.018 | 0.004 |
+| 10 | 0.005 | 0.022 | 0.040 | 0.008 |
+| 40 | 0.005 | 0.023 | **0.049** | 0.011 |
+
+The directional field is **10× the scatter-CNN on pillars and still climbing at 40 pings**
+(the ring plateaus by ping 10 — the phantom-evidence prediction, confirmed). Its solid-IoU is
+near zero because it only maps a thin trace along the path, whereas the scatter-CNN's 0.78
+comes mostly from the easy exterior; the two are complementary, which is why they are summed in
+log-odds for the controller.
+
+**Closed loop — the 2×2** (nobs=3 goal, 12 held-out rooms × 8, **3 model seeds**, macro-average
+per room; identical protocol to §5.4/§5.8):
+
+| | fused doorway POINT (§5.8) | **reactive BEARING** (§5.9) |
+|---|---|---|
+| **scatter-CNN map** (§5.8) | 0.465 ± 0.022 | 0.535 ± 0.006 |
+| **+ clearance field** (§5.9) | 0.472 ± 0.049 | **0.587 ± 0.037** |
+
+Paired per-seed deltas vs the §5.8 baseline: **A alone +0.069 ± 0.027** (positive in 3/3),
+**B alone +0.007 ± 0.052** (nil), **A+B +0.121 ± 0.048**, and **B on top of A +0.052 ± 0.031**
+(positive in 3/3). So the two are **super-additive, with an interaction of ≈+0.045**: a better
+obstacle map is worth *nothing* while the goal estimate is 2.8 m wrong — it only routes you
+accurately to the wrong place — and becomes worth +0.05 once the goal cue is usable. That is the
+same lesson as §5.6 one layer up: a signal's value is set by what consumes it.
+
+**Where the remaining gap lives** (3 seeds, same protocol): giving the §5.9 controller perfect
+obstacles lifts it 0.587 → **0.674**; giving it the perfect doorway lifts it to **0.785**. As in
+§5.8 both halves are imperfect and compound (0.674 & 0.785 → 0.587), and the **doorway half is
+still the bigger limiter** (−0.198 vs −0.087) — the load-bearing cue remains the hardest one,
+exactly as §4.3 said. The ladder: PPO 0.08–0.18 → latent-WM MPC 0.24 → §5.8 map 0.47 → **§5.9
+map 0.59** → perfect map 0.95.
+
+**Ablation — a contradiction carve.** The clearance field marks surfaces ~0.4 m away and
+config-space inflation is 0.5 m, so the map can swallow the agent's own cell, after which every
+sampled move reads as blocked and the planner freezes. Letting proprioception override the map
+*only there* ("I am demonstrably standing here") lifts A+B to **0.604 ± 0.064** and A to
+0.580 ± 0.026, while costing the fused-point baseline ~0.03 (0.465 → 0.434) — an accurate map
+does not want to be overridden. Both settings agree on the headline; the numbers above are the
+**no-carve** ones because that is byte-identical to §5.8's protocol, and the carve is reported
+as an extra mechanism rather than folded into the result.
+
+**Honest scope.** Known-pose, like §5.8's headline (the dead-reckoning rung of §5.8 was not
+re-run here). Single corpus, 3 model seeds, ~±0.04 render-jitter noise, per-room success spans
+[0.0, 1.0]. The reactive controller has three constants (EMA α, lookahead bounds) chosen once and
+not swept — a sweep could move the absolute number, but the +0.069 / +0.052 deltas are paired
+per-seed against a baseline sharing every other component.
+
 ## 6. Summary of findings
 
 1. **Echo-only avoidance is "solved," but degenerately — PPO learns to STOP** (§3.4.1). It
@@ -804,6 +897,21 @@ perception–control interaction, not by static estimator accuracy.
    doorway estimator (§5.7's literal "temporal model") *does* lower the open-loop doorway floor
    (2.8→2.0 m) but navigates **worse** in closed loop (0.29 vs fusion 0.49) — a *static-accuracy ≠
    control* dissociation (cf. §5.2), the stateful model fragile under the policy's own distribution.
+10. **The fix was never "make the estimate better" — it was "give the signal to something that
+    can use it" (§5.9).** Leaving both estimators' accuracy untouched and changing only their
+    consumers moved the cluttered doorway task 0.47 → **0.59** (3 seeds, 0.95 ceiling): consume
+    the binaural bearing **reactively** (a moving subgoal re-anchored at the current pose each
+    step) instead of fusing it into a doorway coordinate, +0.069 ± 0.027; and feed §5.6's
+    clearance readout to an **occupancy map** instead of the planner's cost, +0.052 ± 0.031 *on
+    top of* the first. A control proves the reactive form is not the limit: the true bearing with
+    **no range at all** scores 0.938 vs the true-goal planner's 0.948. Two structural results
+    fall out. (a) **Super-additivity (interaction ≈+0.045):** the clearance map is worth *nil*
+    alone (+0.007) because a better obstacle map only routes you accurately to a doorway estimate
+    that is 2.8 m wrong — signal value is set by the consumer, the same lesson as §5.6 one layer
+    up. (b) A **directional** surface readout (nearest-surface point, 20° bearing) is required —
+    the textbook isotropic sonar ring fails here because the corpus' median clearance is 0.41 m,
+    so the ring is dominated by the wall behind the agent; pillar-IoU 0.005 → 0.049 (10×) only
+    with direction. The doorway half remains the bigger limiter (−0.198 vs −0.087 to ceiling).
 
 ## 7. Honest limitations (for a writeup)
 - Not a scored head-to-head with Mohan & Vanderelst: different sim (2D analytic vs 3D
@@ -866,6 +974,15 @@ python echorl/mapper_seq.py train --out echorl/ckpt/seqgoal_nobs3.pt          # 
 python echorl/mapper_seq.py evalq --ckpt echorl/ckpt/seqgoal_nobs3.pt         # open-loop 3.7->2.0 m (beats fusion) ...
 python echorl/mapper_nav.py --modes scatter+seq                              # ... but closed-loop 0.29 < fusion 0.49 (static!=control)
 python echorl/mapper_render.py                                                # results/echorl_mapping_nobs3.png
+# Reactive bearing + clearance-field map (§5.9) -- change the CONSUMER, not the accuracy:
+python echorl/mapper_react.py train-clear --directional                       # SurfNet: nearest-surface point (R2 0.84, 20 deg)
+python echorl/mapper_react.py train-clear                                     # isotropic clearance net (the ring ablation)
+python echorl/mapper_react.py mapq                                            # open-loop pillar-IoU 0.005 -> 0.049
+python echorl/mapper_react.py nav --ego-carve 0 \
+  --modes true+true true+reacttrue scatter+fuse scatter+react both+fuse both+react true+react both+true
+#   ^ the 2x2 + ceilings; repeat with --occ-ckpt/--goal-ckpt/--surf-ckpt *_s2,*_s3 for the 3 seeds.
+#     true+reacttrue = the mechanism control (TRUE bearing, no range): 0.938 vs true-goal 0.948.
+#     drop --ego-carve 0 for the contradiction-carve ablation (A+B 0.604).
 # Redesigned coverage/explore task (§3.6) + its cue ablation (§3.6.1):
 python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag cover
 python echorl/ppo.py --task explore --nobs 3 --steps 120000 --t-max 60 --tag nomem --no-memory
@@ -884,8 +1001,10 @@ Checkpoints (`echorl/ckpt/`): `dqn_stage0_nobs{0,1}_best.pt`,
 `ppo_goal_nobs0_{full,rangeonly,cochonly,nomem}_s{0,1,2}_best.pt` (Stage-2). `mpc.py` trains
 its world model on the fly (random-trajectory corpus), so it saves no checkpoints. Mapping
 (§5.8): `mapper_nobs3{,_s2,_s3}.pt` (occupancy), `egovec_goal_nobs3{,_s2,_s3}.pt` (doorway
-fusion); corpus `mapper_corpus_nobs3.pkl`; figure `results/echorl_mapping_nobs3.png`.
+fusion); corpus `mapper_corpus_nobs3.pkl`; figure `results/echorl_mapping_nobs3.png`. §5.9:
+`surfnet_nobs3{,_s2,_s3}.pt` (nearest-surface point), `clearnet_nobs3.pt` (isotropic ablation);
+figure `results/echorl_react_clearance.png` (`echorl/plot_headlines.py`).
 
 Code: `src/episode_server.cpp`, `src/verify_episode_server.py`,
 `echorl/{env,vec_env,models,dqn,ppo,oracle,mpc,mpc_direct,mpc_dagger,probe_dd,gate_b,render_traj,collect_corpus,smoke_test}.py`,
-mapping `echorl/{mapping,mapper_collect,mapper,mapper_probe,mapper_fuse,mapper_seq,mapper_nav,mapper_nav_dr,mapper_render}.py`.
+mapping `echorl/{mapping,mapper_collect,mapper,mapper_probe,mapper_fuse,mapper_seq,mapper_nav,mapper_nav_dr,mapper_render,mapper_react}.py`.

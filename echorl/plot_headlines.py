@@ -1,6 +1,7 @@
-"""Two headline figures for EchoRL:
-  1. The bearing gradient   -> results/echorl_bearing_gradient.png
+"""Three headline figures for EchoRL:
+  1. The bearing gradient    -> results/echorl_bearing_gradient.png
   2. The MPC-vs-RL crossover -> results/echorl_mpc_crossover.png
+  3. The §5.9 2x2 + ladder   -> results/echorl_react_clearance.png
 Numbers are the final 3-seed / fair-eval results from docs/EchoRL_RESULTS.md.
 """
 import os
@@ -129,6 +130,94 @@ def mpc_crossover():
     fig.savefig(p, dpi=150); print("saved", p)
 
 
+# ------------------------------------------------------------------ Figure 3
+# Categorical slots 1-2 of the documented palette (blue, orange). Validated:
+# OKLCH L 0.575/0.671 in band, C 0.163/0.175 over floor, CVD dE min(protan,deutan)
+# 24.7 (target 8), normal dE 33.6 (floor 15), contrast 4.30:1 / 3.12:1 vs surface.
+C_FUSE, C_REACT = "#2a78d6", "#eb6834"
+
+
+def react_clearance():
+    # per-seed success, nobs=3 goal, 12 held-out rooms x 8 (no-carve = exact §5.8 protocol)
+    runs = {("scatter", "fuse"):  [0.448, 0.458, 0.490],
+            ("scatter", "react"): [0.542, 0.531, 0.531],
+            ("both", "fuse"):     [0.510, 0.417, 0.490],
+            ("both", "react"):    [0.625, 0.552, 0.583]}
+    mean = {k: float(np.mean(v)) for k, v in runs.items()}
+    sd = {k: float(np.std(v, ddof=1)) for k, v in runs.items()}
+    CEIL = 0.948                                   # planner on the TRUE map
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(12.4, 5.0),
+                                   gridspec_kw={"width_ratios": [1, 1.25]})
+
+    # -- left: the 2x2. Colour = which consumer reads the doorway cue --
+    x = np.arange(2); w = 0.34
+    for j, (goal, colour, lab) in enumerate(
+            [("fuse", C_FUSE, "fused doorway POINT (§5.8)"),
+             ("react", C_REACT, "reactive BEARING (§5.9)")]):
+        m = [mean[(o, goal)] for o in ("scatter", "both")]
+        e = [sd[(o, goal)] for o in ("scatter", "both")]
+        bars = axL.bar(x + (j - 0.5) * (w + 0.02), m, w, color=colour, label=lab, zorder=3)
+        axL.errorbar(x + (j - 0.5) * (w + 0.02), m, yerr=e, fmt="none", ecolor=INK,
+                     capsize=4, lw=1.2, zorder=4)
+        for b, mi, ei in zip(bars, m, e):
+            axL.text(b.get_x() + b.get_width() / 2, mi + ei + 0.018, f"{mi:.2f}",
+                     ha="center", fontsize=10, fontweight="bold", color=INK)
+    axL.axhline(CEIL, ls="--", lw=1, color="#888")
+    axL.text(1.52, CEIL + 0.012, "perfect-map ceiling 0.95", ha="right", va="bottom",
+             color="#666", fontsize=9)
+    # the interaction, stated on the chart
+    axL.annotate("", xy=(1 + (w + 0.02) / 2, mean[("both", "react")]),
+                 xytext=(0 + (w + 0.02) / 2, mean[("scatter", "react")]),
+                 arrowprops=dict(arrowstyle="->", color="#8a4a25", lw=1.4, ls=(0, (4, 2))))
+    axL.text(0.5, 0.68, "+0.05 only\nonce the goal\ncue is usable", ha="center",
+             color="#8a4a25", fontsize=9, fontweight="bold")
+    axL.set_xticks(x)
+    axL.set_xticklabels(["scatter-CNN map\n(§5.8)", "+ clearance field\n(§5.9)"])
+    axL.set_xlabel("obstacle map")
+    axL.set_ylabel("doorway-finding success  (3 seeds, held-out rooms)")
+    axL.set_ylim(0, 1.26); axL.set_xlim(-0.55, 1.55)
+    axL.grid(axis="y", color=GRID, lw=0.7); axL.set_axisbelow(True)
+    axL.legend(loc="upper left", bbox_to_anchor=(0.0, 1.0), frameon=False, fontsize=9.5)
+    axL.set_title("Same map, different CONSUMER of the bearing cue",
+                  fontsize=10.5, fontweight="bold", loc="left")
+
+    # -- right: where §5.9 sits on the whole §5 ladder --
+    rows = [("model-free PPO", 0.13, "#9a9a9a"),
+            ("latent-WM MPC", 0.245, "#9a9a9a"),
+            ("§5.8 map + fused point", mean[("scatter", "fuse")], C_FUSE),
+            ("§5.9 map + reactive bearing", mean[("both", "react")], C_REACT),
+            ("    → given perfect obstacles", 0.674, "#f0a480"),
+            ("    → given perfect doorway", 0.785, "#f0a480"),
+            ("planner on the TRUE map", CEIL, "#5a5a5a")]
+    ys = np.arange(len(rows))[::-1]
+    for y, (lab, v, colour) in zip(ys, rows):
+        axR.barh(y, v, height=0.6, color=colour, zorder=3)
+        off = 0.075 if lab.startswith("model-free") else 0.012   # clear the PPO range bar
+        axR.text(v + off, y, f"{v:.2f}", va="center", fontsize=10,
+                 fontweight="bold", color=INK)
+    axR.errorbar(0.13, ys[0], xerr=[[0.05], [0.05]], fmt="none", ecolor=INK,
+                 capsize=4, lw=1.2, zorder=4)
+    axR.set_yticks(ys); axR.set_yticklabels([r[0] for r in rows], fontsize=9.5)
+    axR.set_xlabel("doorway-finding success (cluttered, nobs=3)")
+    axR.set_xlim(0, 1.12)
+    axR.grid(axis="x", color=GRID, lw=0.7); axR.set_axisbelow(True)
+    axR.annotate("following a DIRECTION costs nothing:\ntrue bearing with NO range = 0.94",
+                 xy=(CEIL, ys[-1] - 0.34), xytext=(0.52, ys[-1] - 1.15),
+                 arrowprops=dict(arrowstyle="->", color="#666", lw=1.2),
+                 color="#444", fontsize=9, style="italic", ha="center")
+    axR.set_ylim(-1.75, len(rows) - 0.4)
+    axR.set_title("Both halves still imperfect — and they compound",
+                  fontsize=10.5, fontweight="bold", loc="left")
+
+    fig.suptitle("EchoRL §5.9 — a bearing is a gradient to follow, not a coordinate to compute",
+                 fontsize=13, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    p = os.path.join(OUT, "echorl_react_clearance.png")
+    fig.savefig(p, dpi=150); print("saved", p)
+
+
 if __name__ == "__main__":
     bearing_gradient()
     mpc_crossover()
+    react_clearance()
