@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EchoRL first-person viewer (Steam Audio)</title>
+<style>
+:root{ --bg:#0c1113; --panel:#131a1dee; --ink:#e8eef0; --muted:#94a2a8; --line:#25323a;
+  --accent:#43c0d6; --good:#3fb96b; --bad:#e05a4e; --gold:#e8c547;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace; --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+*{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; background:var(--bg); color:var(--ink); font-family:var(--sans); overflow:hidden; }
+#gl{ position:absolute; inset:0; width:100%; height:100%; display:block; cursor:grab; }
+#gl.free{ cursor:crosshair; }
+.hud{ position:absolute; pointer-events:none; font-family:var(--mono); font-size:12px; }
+#topleft{ left:14px; top:12px; line-height:1.5; text-shadow:0 1px 3px #000c; }
+#topleft b{ color:var(--accent); font-weight:600; }
+#banner{ left:50%; top:14px; transform:translateX(-50%); font-size:15px; font-weight:700; letter-spacing:.06em;
+  padding:6px 14px; border-radius:6px; background:#000a; display:none; }
+#banner.ok{ display:block; color:var(--good); } #banner.bad{ display:block; color:var(--bad); }
+#vignette{ position:absolute; inset:0; pointer-events:none; opacity:0; transition:opacity .15s;
+  background:radial-gradient(ellipse at center, transparent 45%, #e05a4e88 100%); }
+#reticle{ left:50%; top:50%; transform:translate(-50%,-50%); width:14px; height:14px; border:1px solid #fff9; border-radius:50%; }
+#panel{ position:absolute; right:12px; top:12px; width:300px; background:var(--panel); border:1px solid var(--line);
+  border-radius:10px; padding:12px 14px; font-size:12.5px; backdrop-filter:blur(6px); }
+#panel h1{ font-size:13px; margin:0 0 8px; letter-spacing:.12em; text-transform:uppercase; color:var(--accent); font-family:var(--mono); }
+#panel label{ display:block; color:var(--muted); margin:8px 0 3px; font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+#panel select,#panel input[type=range]{ width:100%; }
+#panel select{ background:#0c1113; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:5px 6px; font-size:12.5px; }
+.row{ display:flex; gap:6px; align-items:center; }
+button{ background:#1b262b; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:5px 10px; font-size:12.5px; cursor:pointer; }
+button:hover{ border-color:var(--accent); } button.on{ background:var(--accent); color:#08181c; border-color:var(--accent); }
+#stats{ font-family:var(--mono); font-size:11.5px; line-height:1.55; margin-top:8px; color:var(--muted); white-space:pre; }
+#stats b{ color:var(--ink); font-weight:600; }
+#help{ margin-top:8px; color:var(--muted); font-size:11px; line-height:1.5; }
+#help kbd{ font-family:var(--mono); background:#0c1113; border:1px solid var(--line); border-radius:4px; padding:0 4px; }
+#sensors{ position:absolute; left:12px; bottom:12px; display:flex; gap:10px; align-items:flex-end; pointer-events:none; }
+.card{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px 10px 6px; }
+.card .t{ font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin-bottom:4px; }
+canvas.c2d{ display:block; }
+#legend{ position:absolute; right:12px; bottom:12px; background:var(--panel); border:1px solid var(--line); border-radius:10px;
+  padding:8px 10px; font-family:var(--mono); font-size:11px; color:var(--muted); line-height:1.6; }
+#legend i{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="vignette"></div>
+<div class="hud" id="reticle"></div>
+<div class="hud" id="topleft"></div>
+<div class="hud" id="banner"></div>
+
+<div id="panel">
+  <h1>EchoRL · first person · Steam Audio</h1>
+  <label>Episode</label>
+  <select id="ep"></select>
+  <label>Step <span id="tlab"></span></label>
+  <input type="range" id="scrub" min="0" max="1" step="0.01" value="0">
+  <div class="row" style="margin-top:8px">
+    <button id="play">▶ play</button>
+    <button id="prev">◀</button><button id="next">▶</button>
+    <button id="mode" title="F">ride agent</button>
+  </div>
+  <label>Playback speed <span id="spdlab"></span></label>
+  <input type="range" id="spd" min="0.25" max="4" step="0.25" value="1">
+  <label>Field of view <span id="fovlab"></span></label>
+  <input type="range" id="fov" min="50" max="120" step="1" value="85">
+  <div id="stats"></div>
+  <div id="help"><kbd>space</kbd> play · <kbd>←</kbd><kbd>→</kbd> step · <kbd>F</kbd> free-look
+   (<kbd>W A S D</kbd> move, <kbd>Q E</kbd> down/up, drag to look) · <kbd>R</kbd> back to agent</div>
+</div>
+
+<div id="sensors">
+  <div class="card"><div class="t">matched-filter range profile (what the agent hears)</div><canvas class="c2d" id="rng" width="420" height="120"></canvas></div>
+  <div class="card"><div class="t">binaural L / R energy</div><canvas class="c2d" id="lr" width="120" height="120"></canvas></div>
+  <div class="card"><div class="t">plan · from the mesh</div><canvas class="c2d" id="map" width="200" height="200"></canvas></div>
+</div>
+<div id="legend"></div>
+
+<script>
+const D = /*__DATA__*/null;
+if (!D) document.body.innerHTML = "<p style='padding:20px'>No data embedded — run echorl/fp_viewer.py.</p>";
+
+// ------------------------------------------------------------- material colours
+const MAT_RGB = [[0.86,0.82,0.74],[0.72,0.86,0.90],[0.62,0.42,0.36],[0.78,0.82,0.92]];   // plaster tile carpet mirror
+const KIND_TINT = [0.78, 0.92, 1.0, 0.86];                                             // floor ceil wall obstacle
+
+// ------------------------------------------------------------------- WebGL
+const cv = document.getElementById("gl");
+const gl = cv.getContext("webgl", {antialias:true});
+const VS = `
+attribute vec3 p; attribute vec3 n; attribute vec3 c; attribute float k;
+uniform mat4 mvp; varying vec3 vn, vc, vp; varying float vk;
+void main(){ gl_Position = mvp*vec4(p,1.0); vn=n; vc=c; vp=p; vk=k; }`;
+const FS = `
+precision mediump float;
+uniform vec3 eye; uniform vec3 fwd; varying vec3 vn, vc, vp; varying float vk;
+void main(){
+  vec3 d = vp - eye; float dist = length(d); vec3 v = d/dist;
+  vec3 nn = normalize(vn); float lam = abs(dot(nn, v));               // headlight, two-sided
+  float top = 0.5 + 0.5*nn.y;                                          // soft sky term
+  float l = 0.30 + 0.55*lam + 0.15*top;
+  vec3 col = vc*l;
+  if (vk < 0.5) {                                                      // floor: 1 m grid so motion reads
+    vec2 g = abs(fract(vp.xz + 0.5) - 0.5) / fwidth(vp.xz);
+    float line = 1.0 - min(min(g.x, g.y), 1.0);
+    col = mix(col, col*0.55, line*0.8);
+  }
+  float fog = 1.0 - exp(-dist*0.09);
+  col = mix(col, vec3(0.05,0.07,0.08), fog);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+const LVS = `attribute vec3 p; uniform mat4 mvp; void main(){ gl_Position=mvp*vec4(p,1.0); gl_PointSize=6.0; }`;
+const LFS = `precision mediump float; uniform vec4 col; void main(){ gl_FragColor=col; }`;
+function sh(t,s){ const o=gl.createShader(t); gl.shaderSource(o,s); gl.compileShader(o);
+  if(!gl.getShaderParameter(o,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(o); return o; }
+function prog(v,f){ const p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,v)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,f));
+  gl.linkProgram(p); if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw gl.getProgramInfoLog(p); return p; }
+gl.getExtension("OES_standard_derivatives");
+const P = prog(VS, "#extension GL_OES_standard_derivatives : enable\n"+FS);
+const PL = prog(LVS, LFS);
+const loc = n => gl.getAttribLocation(P,n), uni = (p,n) => gl.getUniformLocation(p,n);
+
+// ------------------------------------------------------------ mesh -> buffers
+let mesh = null, roomIdx = -1;
+function buildRoom(ri){
+  const R = D.rooms[ri]; const V = R.v, F = R.f; const nt = F.length/3;
+  const pos = new Float32Array(nt*9), nrm = new Float32Array(nt*9), col = new Float32Array(nt*9), kin = new Float32Array(nt*3);
+  const segs = [];                                   // minimap: vertical faces that span ear height
+  for (let t=0;t<nt;t++){
+    const a=F[3*t],b=F[3*t+1],c=F[3*t+2];
+    const A=[V[3*a],V[3*a+1],V[3*a+2]], B=[V[3*b],V[3*b+1],V[3*b+2]], C=[V[3*c],V[3*c+1],V[3*c+2]];
+    const e1=[B[0]-A[0],B[1]-A[1],B[2]-A[2]], e2=[C[0]-A[0],C[1]-A[1],C[2]-A[2]];
+    let n=[e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]];
+    const L=Math.hypot(...n)||1; n=n.map(x=>x/L);
+    const m=MAT_RGB[R.mat[t]]||MAT_RGB[0], k=R.kind[t], tint=KIND_TINT[k];
+    const rgb = k===3 ? [m[0]*tint*0.9, m[1]*tint*0.85, m[2]*tint*0.9] : m.map(x=>x*tint);
+    [A,B,C].forEach((v,i)=>{ pos.set(v,9*t+3*i); nrm.set(n,9*t+3*i); col.set(rgb,9*t+3*i); kin[3*t+i]=k; });
+    if (Math.abs(n[1])<0.5){
+      const ys=[A[1],B[1],C[1]]; if (Math.min(...ys)<=D.ear_y && Math.max(...ys)>=D.ear_y){
+        const xz=[[A[0],A[2]],[B[0],B[2]],[C[0],C[2]]]; let best=null,bd=-1;
+        for(let i=0;i<3;i++){ const q=xz[i],r=xz[(i+1)%3]; const d=Math.hypot(q[0]-r[0],q[1]-r[1]); if(d>bd){bd=d;best=[q,r];} }
+        segs.push(best);
+      }
+    }
+  }
+  const mk=(arr,sz)=>{ const b=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,arr,gl.STATIC_DRAW); return {b,sz}; };
+  mesh = { n:nt*3, pos:mk(pos,3), nrm:mk(nrm,3), col:mk(col,3), kin:mk(kin,1), segs, R };
+  roomIdx = ri;
+}
+
+// ------------------------------------------------------------------ matrices
+function perspective(fov,asp,near,far){ const f=1/Math.tan(fov/2), nf=1/(near-far);
+  return new Float32Array([f/asp,0,0,0, 0,f,0,0, 0,0,(far+near)*nf,-1, 0,0,2*far*near*nf,0]); }
+function lookAt(e,f,u){ const s=[f[1]*u[2]-f[2]*u[1], f[2]*u[0]-f[0]*u[2], f[0]*u[1]-f[1]*u[0]]; const sl=Math.hypot(...s)||1; s[0]/=sl;s[1]/=sl;s[2]/=sl;
+  const uu=[s[1]*f[2]-s[2]*f[1], s[2]*f[0]-s[0]*f[2], s[0]*f[1]-s[1]*f[0]];
+  return new Float32Array([s[0],uu[0],-f[0],0, s[1],uu[1],-f[1],0, s[2],uu[2],-f[2],0,
+    -(s[0]*e[0]+s[1]*e[1]+s[2]*e[2]), -(uu[0]*e[0]+uu[1]*e[1]+uu[2]*e[2]), (f[0]*e[0]+f[1]*e[1]+f[2]*e[2]), 1]); }
+function mul(a,b){ const o=new Float32Array(16); for(let i=0;i<4;i++)for(let j=0;j<4;j++){ let s=0; for(let k=0;k<4;k++) s+=a[k*4+j]*b[i*4+k]; o[i*4+j]=s; } return o; }
+
+// -------------------------------------------------------------- pose model
+// yaw convention (env.py): forward = (sin yaw, 0, -cos yaw); yaw 0 = -z; +yaw turns right.
+const fwdOf = (yaw,pitch=0)=>{ const t=yaw*Math.PI/180, c=Math.cos(pitch); return [Math.sin(t)*c, Math.sin(pitch), -Math.cos(t)*c]; };
+let ep = D.episodes[0], u = 0, playing = false, speed = 1, free = false, fov = 85;
+let cam = {x:0, y:D.ear_y, z:0, yaw:0, pitch:0};
+const TURN_FRAC = 0.35;  // first 35% of a segment: turn in place, then translate (env applies both in one step)
+function poseAt(u){       // interpolate between logged steps for smooth playback
+  const S = ep.steps; const i = Math.min(Math.floor(u), S.length-1), f = u - i;
+  const a = S[i].pose, b = S[Math.min(i+1,S.length-1)].pose;
+  let dyaw = b[2]-a[2]; dyaw = ((dyaw+540)%360)-180;
+  const ty = Math.min(1, f/TURN_FRAC), tm = Math.max(0, (f-TURN_FRAC)/(1-TURN_FRAC));
+  const sm = tm*tm*(3-2*tm);
+  return { x:a[0]+(b[0]-a[0])*sm, z:a[1]+(b[1]-a[1])*sm, yaw:a[2]+dyaw*ty, i, f };
+}
+
+// ------------------------------------------------------------------ render
+function resize(){ const dpr=Math.min(devicePixelRatio||1,2); cv.width=innerWidth*dpr; cv.height=innerHeight*dpr; gl.viewport(0,0,cv.width,cv.height); }
+addEventListener("resize",resize); resize();
+
+function drawLines(mvp, pts, col, mode){
+  gl.useProgram(PL); const b=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(pts),gl.STREAM_DRAW);
+  const l=gl.getAttribLocation(PL,"p"); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l,3,gl.FLOAT,false,0,0);
+  gl.uniformMatrix4fv(uni(PL,"mvp"),false,mvp); gl.uniform4fv(uni(PL,"col"),col); gl.drawArrays(mode,0,pts.length/3); gl.deleteBuffer(b);
+}
+
+function render(){
+  if (ep.room!==roomIdx) buildRoom(ep.room);
+  const p = poseAt(u);
+  if (!free){ cam.x=p.x; cam.z=p.z; cam.y=D.ear_y; cam.yaw=p.yaw; cam.pitch=0; }
+  const eye=[cam.x,cam.y,cam.z], f=fwdOf(cam.yaw,cam.pitch);
+  const mvp = mul(perspective(fov*Math.PI/180, cv.width/cv.height, 0.05, 80), lookAt(eye,f,[0,1,0]));
+  gl.clearColor(0.55,0.72,0.82,1); gl.enable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(P);
+  for (const [nm,buf] of [["p",mesh.pos],["n",mesh.nrm],["c",mesh.col],["k",mesh.kin]]){ const l=loc(nm); gl.bindBuffer(gl.ARRAY_BUFFER,buf.b); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l,buf.sz,gl.FLOAT,false,0,0); }
+  gl.uniformMatrix4fv(uni(P,"mvp"),false,mvp); gl.uniform3fv(uni(P,"eye"),eye); gl.uniform3fv(uni(P,"fwd"),f);
+  gl.drawArrays(gl.TRIANGLES,0,mesh.n);
+  // trail walked so far (on the floor) + the agent itself when in free-look
+  const trail=[]; for(let i=0;i<=p.i;i++){ const s=ep.steps[i].pose; trail.push(s[0],0.02,s[1]); } trail.push(p.x,0.02,p.z);
+  drawLines(mvp, trail, [0.26,0.75,0.84,1], gl.LINE_STRIP);
+  if (free){ const ring=[]; for(let k=0;k<=32;k++){ const a=k/32*2*Math.PI; ring.push(p.x+D.agent_r*Math.cos(a), D.ear_y, p.z+D.agent_r*Math.sin(a)); }
+    drawLines(mvp, ring, [0.26,0.75,0.84,1], gl.LINE_STRIP);
+    const fw=fwdOf(p.yaw); drawLines(mvp,[p.x,D.ear_y,p.z, p.x+fw[0]*0.8,D.ear_y,p.z+fw[2]*0.8],[1,1,1,1],gl.LINES);
+    drawLines(mvp,[p.x,0.02,p.z, p.x,D.ear_y,p.z],[0.26,0.75,0.84,0.6],gl.LINES); }
+  if (ep.goal){ const g=ep.goal, ring=[]; for(let k=0;k<=48;k++){ const a=k/48*2*Math.PI; ring.push(g[0]+D.goal_radius*Math.cos(a),0.03,g[1]+D.goal_radius*Math.sin(a)); }
+    drawLines(mvp, ring, [0.91,0.77,0.28,1], gl.LINE_STRIP);
+    drawLines(mvp, [g[0],0,g[1], g[0],2.2,g[1]], [0.91,0.77,0.28,1], gl.LINES); }
+  drawHUD(p);
+}
+
+// --------------------------------------------------------------------- HUD
+const $=id=>document.getElementById(id);
+const rngC=$("rng").getContext("2d"), lrC=$("lr").getContext("2d"), mapC=$("map").getContext("2d");
+function drawHUD(p){
+  const S=ep.steps, s=S[p.i], last=S[S.length-1], R=D.rooms[ep.room];
+  $("tlab").textContent = `${p.i} / ${S.length-1}`;
+  const act = s.act ? `Δyaw ${s.act[0]>=0?"+":""}${s.act[0].toFixed(1)}°  step ${s.act[1].toFixed(2)} m` : "—";
+  $("topleft").innerHTML = `<b>${ep.ctrl}</b> · room seed ${R.seed} · ${R.L[0].toFixed(1)} × ${R.L[2].toFixed(1)} m, ${R.L[1].toFixed(1)} m high<br>`+
+    `t = ${p.i} · pose x ${p.x.toFixed(2)} z ${p.z.toFixed(2)} yaw ${((p.yaw%360)+360)%360|0}°<br>`+
+    `last action ${act}${s.clear!=null?`  ·  clearance ${s.clear.toFixed(2)} m`:""}`+(free?"<br><b>FREE LOOK</b>":"");
+  const st=$("stats");
+  st.innerHTML = `reward   <b>${s.reward.toFixed(3)}</b>   Σ <b>${S.slice(0,p.i+1).reduce((a,q)=>a+q.reward,0).toFixed(2)}</b>\n`+
+    `collision <b>${s.collision?"YES":"no"}</b>${ep.goal?`   dist→goal <b>${Math.hypot(p.x-ep.goal[0],p.z-ep.goal[1]).toFixed(2)} m</b>`:""}\n`+
+    `outcome   <b style="color:${ep.success?"var(--good)":"var(--bad)"}">${ep.success?"SUCCESS":"FAIL"}</b> after ${S.length-1} steps\n`+
+    `wall mats  ${[...new Set(R.mat.filter((m,i)=>R.kind[i]===2))].map(m=>D.mat_names[m]).join(", ")}`;
+  $("vignette").style.opacity = (s.collision && p.f<0.6) ? 1 : 0;
+  const done = p.i>=S.length-1; const b=$("banner");
+  b.className = done ? (ep.success?"hud ok":"hud bad") : "hud"; b.textContent = done ? (ep.success?(D.task==="goal"?"★ reached the doorway":"survived the flight"):(s.collision?"✕ crashed":"✕ timed out")) : "";
+
+  // --- range profile
+  const W=rngC.canvas.width,H=rngC.canvas.height; rngC.clearRect(0,0,W,H);
+  const r=s.range, mx=Math.max(...S.flatMap(q=>q.range))*1.05||1, xm=D.range_m[D.range_m.length-1];
+  rngC.strokeStyle="#25323a"; rngC.lineWidth=1; rngC.beginPath();
+  for(let m=0;m<=xm;m+=2){ const x=m/xm*(W-4)+2; rngC.moveTo(x,0); rngC.lineTo(x,H-14); } rngC.stroke();
+  rngC.fillStyle="#94a2a8"; rngC.font="10px ui-monospace,monospace";
+  for(let m=0;m<=xm;m+=2) rngC.fillText(m+" m", m/xm*(W-4)+3, H-3);
+  const grad=rngC.createLinearGradient(0,0,0,H); grad.addColorStop(0,"#43c0d6cc"); grad.addColorStop(1,"#43c0d611");
+  rngC.fillStyle=grad; rngC.beginPath(); rngC.moveTo(2,H-14);
+  for(let i=0;i<r.length;i++) rngC.lineTo(D.range_m[i]/xm*(W-4)+2, H-14-(r[i]/mx)*(H-20)); rngC.lineTo(W-2,H-14); rngC.closePath(); rngC.fill();
+  rngC.strokeStyle="#43c0d6"; rngC.lineWidth=1.2; rngC.beginPath();
+  for(let i=0;i<r.length;i++){ const x=D.range_m[i]/xm*(W-4)+2, y=H-14-(r[i]/mx)*(H-20); i?rngC.lineTo(x,y):rngC.moveTo(x,y); } rngC.stroke();
+  // --- L/R
+  const w=lrC.canvas.width,h=lrC.canvas.height; lrC.clearRect(0,0,w,h);
+  const lmax=Math.max(...S.flatMap(q=>q.lr))||1, L=s.lr[0]/lmax, Rr=s.lr[1]/lmax;
+  lrC.fillStyle="#43c0d6"; lrC.fillRect(14,h-16-L*(h-30),36,L*(h-30)); lrC.fillStyle="#e8c547"; lrC.fillRect(70,h-16-Rr*(h-30),36,Rr*(h-30));
+  lrC.fillStyle="#94a2a8"; lrC.font="10px ui-monospace,monospace"; lrC.fillText("L",28,h-4); lrC.fillText("R",84,h-4);
+  const ild=s.lr[0]-s.lr[1]; lrC.fillStyle="#e8eef0"; lrC.fillText((ild>0?"◀ ":"")+"Δ "+ild.toFixed(1)+(ild<0?" ▶":""),30,11);
+  // --- minimap from the mesh (vertical faces at ear height)
+  const M=mapC.canvas.width; mapC.clearRect(0,0,M,M);
+  const Lx=R.L[0],Lz=R.L[2], sc=(M-16)/Math.max(Lx,Lz), X=x=>M/2+x*sc, Z=z=>M/2+z*sc;
+  mapC.strokeStyle="#e8eef0"; mapC.lineWidth=2; mapC.beginPath();
+  for(const [a,b] of mesh.segs){ mapC.moveTo(X(a[0]),Z(a[1])); mapC.lineTo(X(b[0]),Z(b[1])); } mapC.stroke();
+  if (ep.goal){ mapC.strokeStyle="#e8c547"; mapC.lineWidth=1; mapC.beginPath(); mapC.arc(X(ep.goal[0]),Z(ep.goal[1]),D.goal_radius*sc,0,7); mapC.stroke(); }
+  mapC.strokeStyle="#43c0d6aa"; mapC.lineWidth=1.2; mapC.beginPath();
+  S.forEach((q,i)=>{ const x=X(q.pose[0]),z=Z(q.pose[1]); i?mapC.lineTo(x,z):mapC.moveTo(x,z); }); mapC.stroke();
+  const fw=fwdOf(free?cam.yaw:p.yaw); mapC.fillStyle=free?"#ffffff":"#43c0d6";
+  const cx=X(free?cam.x:p.x), cz=Z(free?cam.z:p.z);
+  mapC.beginPath(); mapC.moveTo(cx+fw[0]*9,cz+fw[2]*9); mapC.lineTo(cx-fw[2]*4-fw[0]*4,cz+fw[0]*4-fw[2]*4); mapC.lineTo(cx+fw[2]*4-fw[0]*4,cz-fw[0]*4-fw[2]*4); mapC.closePath(); mapC.fill();
+  if (free){ mapC.fillStyle="#43c0d6"; mapC.beginPath(); mapC.arc(X(p.x),Z(p.z),3,0,7); mapC.fill(); }
+  // FOV wedge
+  mapC.strokeStyle="#ffffff33"; mapC.beginPath(); const half=fov/2*Math.PI/180, yaw=(free?cam.yaw:p.yaw)*Math.PI/180;
+  for(const s2 of [-1,1]){ mapC.moveTo(cx,cz); mapC.lineTo(cx+Math.sin(yaw+s2*half)*40, cz-Math.cos(yaw+s2*half)*40); } mapC.stroke();
+}
+
+// ----------------------------------------------------------------- controls
+const sel=$("ep");
+D.episodes.forEach((e,i)=>{ const o=document.createElement("option"); o.value=i;
+  o.textContent=`${e.success?"✓":"✕"} room ${D.rooms[e.room].seed} · ${e.ctrl} · start ${e.start} (${e.steps.length-1} steps)`; sel.appendChild(o); });
+sel.onchange=()=>{ ep=D.episodes[+sel.value]; u=0; free=false; $("mode").textContent="ride agent"; cv.classList.remove("free"); syncScrub(); };
+function syncScrub(){ const sc=$("scrub"); sc.max=ep.steps.length-1; sc.value=u; }
+$("scrub").oninput=e=>{ u=+e.target.value; playing=false; $("play").textContent="▶ play"; };
+$("play").onclick=()=>{ playing=!playing; if(playing && u>=ep.steps.length-1) u=0; $("play").textContent=playing?"❚❚ pause":"▶ play"; };
+$("prev").onclick=()=>{ u=Math.max(0,Math.ceil(u)-1); playing=false; syncScrub(); };
+$("next").onclick=()=>{ u=Math.min(ep.steps.length-1,Math.floor(u)+1); playing=false; syncScrub(); };
+$("spd").oninput=e=>{ speed=+e.target.value; $("spdlab").textContent=speed+"×"; }; $("spdlab").textContent="1×";
+$("fov").oninput=e=>{ fov=+e.target.value; $("fovlab").textContent=fov+"°"; }; $("fovlab").textContent="85°";
+function toggleFree(){ free=!free; $("mode").textContent=free?"free look":"ride agent"; cv.classList.toggle("free",free); if(!free) cam.pitch=0; }
+$("mode").onclick=toggleFree;
+const keys={};
+addEventListener("keydown",e=>{ if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") e.target.blur();
+  keys[e.key.toLowerCase()]=true;
+  if(e.key===" "){ $("play").click(); e.preventDefault(); }
+  if(e.key==="ArrowLeft") $("prev").click(); if(e.key==="ArrowRight") $("next").click();
+  if(e.key.toLowerCase()==="f") toggleFree(); if(e.key.toLowerCase()==="r"){ free=false; $("mode").textContent="ride agent"; cv.classList.remove("free"); } });
+addEventListener("keyup",e=>{ keys[e.key.toLowerCase()]=false; });
+let drag=null;
+cv.onmousedown=e=>{ drag=[e.clientX,e.clientY]; if(!free) toggleFree(); };
+addEventListener("mouseup",()=>drag=null);
+addEventListener("mousemove",e=>{ if(!drag) return; cam.yaw+=(e.clientX-drag[0])*0.25; cam.pitch=Math.max(-1.4,Math.min(1.4,cam.pitch-(e.clientY-drag[1])*0.004)); drag=[e.clientX,e.clientY]; });
+
+// -------------------------------------------------------------------- loop
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(0.1,(now-last)/1000); last=now;
+  if (playing){ u+=dt*speed*1.6; if(u>=ep.steps.length-1){ u=ep.steps.length-1; playing=false; $("play").textContent="▶ play"; } $("scrub").value=u; }
+  if (free){ const f=fwdOf(cam.yaw), r=[-f[2],0,f[0]], v=2.2*dt;
+    if(keys.w){cam.x+=f[0]*v;cam.z+=f[2]*v;} if(keys.s){cam.x-=f[0]*v;cam.z-=f[2]*v;}
+    if(keys.d){cam.x+=r[0]*v;cam.z+=r[2]*v;} if(keys.a){cam.x-=r[0]*v;cam.z-=r[2]*v;}
+    if(keys.e) cam.y+=v; if(keys.q) cam.y-=v; }
+  render(); requestAnimationFrame(frame);
+}
+$("legend").innerHTML = D.mat_names.map((n,i)=>`<i style="background:rgb(${MAT_RGB[i].map(x=>x*255|0)})"></i>${n}`).join("<br>")+
+  `<br><i style="background:#43c0d6"></i>path / agent<br><i style="background:#e8c547"></i>goal ring (${D.goal_radius} m)<br>`+
+  `<span style="color:var(--muted)">task: ${D.task}, ${D.nobs} pillars · sky = carved doorway</span>`;
+// deep link: viewer.html#ep=6&t=12  (episode index, step)
+try { const h=new URLSearchParams(location.hash.slice(1)); if(h.has("ep")){ sel.value=Math.min(D.episodes.length-1,+h.get("ep")|0); ep=D.episodes[+sel.value]; }
+  if(h.has("t")) u=Math.max(0,Math.min(ep.steps.length-1,+h.get("t"))); } catch(e){}
+buildRoom(ep.room); syncScrub(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
