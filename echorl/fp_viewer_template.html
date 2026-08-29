@@ -220,12 +220,13 @@ function drawHUD(p){
     `last action ${act}${s.clear!=null?`  ·  clearance ${s.clear.toFixed(2)} m`:""}`+(free?"<br><b>FREE LOOK</b>":"");
   const st=$("stats");
   st.innerHTML = `reward   <b>${s.reward.toFixed(3)}</b>   Σ <b>${S.slice(0,p.i+1).reduce((a,q)=>a+q.reward,0).toFixed(2)}</b>\n`+
-    `collision <b>${s.collision?"YES":"no"}</b>${ep.goal?`   dist→goal <b>${Math.hypot(p.x-ep.goal[0],p.z-ep.goal[1]).toFixed(2)} m</b>`:""}\n`+
+    `collision <b>${s.collision?"YES":"no"}</b>${ep.goal?`   dist→goal <b>${Math.hypot(p.x-ep.goal[0],p.z-ep.goal[1]).toFixed(2)} m</b>`:""}`+
+    `${s.cover!=null?`   covered <b>${s.cover}</b> cells (${last.cover} final)`:""}\n`+
     `outcome   <b style="color:${ep.success?"var(--good)":"var(--bad)"}">${ep.success?"SUCCESS":"FAIL"}</b> after ${S.length-1} steps\n`+
     `wall mats  ${[...new Set(R.mat.filter((m,i)=>R.kind[i]===2))].map(m=>D.mat_names[m]).join(", ")}`;
   $("vignette").style.opacity = (s.collision && p.f<0.6) ? 1 : 0;
   const done = p.i>=S.length-1; const b=$("banner");
-  b.className = done ? (ep.success?"hud ok":"hud bad") : "hud"; b.textContent = done ? (ep.success?(D.task==="goal"?"★ reached the doorway":"survived the flight"):(s.collision?"✕ crashed":"✕ timed out")) : "";
+  b.className = done ? (ep.success?"hud ok":"hud bad") : "hud"; b.textContent = done ? (ep.success?(D.task==="goal"?"★ reached the doorway":D.task==="explore"?`swept ${last.cover} cells without crashing`:"survived the flight"):(s.collision?"✕ crashed":"✕ timed out")) : "";
 
   // --- range profile
   const W=rngC.canvas.width,H=rngC.canvas.height; rngC.clearRect(0,0,W,H);
@@ -248,6 +249,8 @@ function drawHUD(p){
   // --- minimap from the mesh (vertical faces at ear height)
   const M=mapC.canvas.width; mapC.clearRect(0,0,M,M);
   const Lx=R.L[0],Lz=R.L[2], sc=(M-16)/Math.max(Lx,Lz), X=x=>M/2+x*sc, Z=z=>M/2+z*sc;
+  if (D.task==="explore"){ mapC.fillStyle="#43c0d622";                     // visited 1 m cells so far
+    for(let i=0;i<=p.i;i++){ const q=S[i].pose; mapC.fillRect(X(Math.floor(q[0])),Z(Math.floor(q[1])),sc,sc); } }
   mapC.strokeStyle="#e8eef0"; mapC.lineWidth=2; mapC.beginPath();
   for(const [a,b] of mesh.segs){ mapC.moveTo(X(a[0]),Z(a[1])); mapC.lineTo(X(b[0]),Z(b[1])); } mapC.stroke();
   if (ep.goal){ mapC.strokeStyle="#e8c547"; mapC.lineWidth=1; mapC.beginPath(); mapC.arc(X(ep.goal[0]),Z(ep.goal[1]),D.goal_radius*sc,0,7); mapC.stroke(); }

@@ -137,6 +137,7 @@ def rollout_logged(kind, model, env, obs, info, dev, H, srv):
                     reward=round(float(r), 4),
                     collision=bool(info.get("collision", False)),
                     success=bool(info.get("success", False)),
+                    cover=info.get("coverage"),          # explore task: distinct 1 m cells visited
                     clear=None if info.get("clearance") is None else round(float(info["clearance"]), 3))
     steps = [rec(obs, info)]
     h = torch.zeros(1, 1, model.H, device=dev) if kind == "ppo" else None
@@ -205,7 +206,23 @@ def main():
     else:
         seeds = (opening_seeds(600, args.rooms, args.nobs) if args.task == "goal"
                  else list(range(600, 600 + args.rooms)))
+    # PPO ablation checkpoints (nomem / rangeonly / cochonly) need their constructor flags;
+    # render_traj's loader assumes the full recurrent net, so load those here instead.
+    def load_ppo(path):
+        from ppo import RecurrentAC
+        sd = torch.load(path, map_location=dev)["model"]
+        base = os.path.basename(path)
+        net = RecurrentAC(memory="gru.weight_ih_l0" in sd,
+                          drop_range="cochonly" in base, drop_coch="rangeonly" in base).to(dev)
+        net.load_state_dict(sd); net.eval()
+        return net
+    ckpts = {args.ppo_label: args.ppo_ckpt, args.ppo2_label: args.ppo2_ckpt}
+    for k in ("ppo_ckpt", "ppo2_ckpt"):
+        setattr(args, k, "")
     ctrls = make_controllers(args.task, args, dev)
+    for label, path in ckpts.items():
+        if path:
+            ctrls[label] = ("ppo", load_ppo(path))
     if args.task == "goal" and not ctrls:
         ctrls["privileged oracle"] = ("oracle_goal", None)
     if not ctrls:
