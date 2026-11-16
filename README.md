@@ -72,7 +72,7 @@ All numbers are per-room averages on held-out rooms.
 - The Steam Audio SDK. `src/build.bat` and `run_all.ps1` expect it at `..\Plugins\SteamAudio\Source\SteamAudioSDK`,
   that is, this folder placed inside an Unreal project that has the Steam Audio plugin. Edit `SDK` in
   `build.bat` to point elsewhere. The later EchoRL reruns used a fork of phonon with finer reflection timing
-  ([steam-audio-finebin](https://github.com/adityakaduskar/steam-audio-finebin)), dropped into `tools/`.
+  (not yet public), dropped into `tools/`. The stock SDK runs every experiment here.
 - Python 3.11 or 3.12 with `numpy` and `torch` (`jepa/requirements.txt`). A CUDA build of PyTorch is
   recommended. The scripts fall back to the CPU.
 - The SoundSpaces 2.0 port needs habitat-sim, which runs under Linux or WSL2.
@@ -119,10 +119,9 @@ Section 8 of [`docs/EchoRL_RESULTS.md`](docs/EchoRL_RESULTS.md) lists the comman
 
 ## Related repositories
 
-- [audio-engine-validation](https://github.com/adityakaduskar/audio-engine-validation): validation of Steam
-  Audio and SoundSpaces 2.0 as acoustic simulators.
-- [ultra-engine](https://github.com/adityakaduskar/ultra-engine): an acoustics engine for ultrasonic
-  echolocation, intended as the next renderer for these agents.
+- [audio-engine-echolocation](https://github.com/adityakaduskar/audio-engine-echolocation): validation of
+  Steam Audio and SoundSpaces 2.0 as acoustic simulators, and the ranging, navigation and multi-agent
+  experiments on the same renderer.
 
 ## Author
 
