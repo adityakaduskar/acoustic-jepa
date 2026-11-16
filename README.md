@@ -41,13 +41,15 @@ All numbers are per-room averages on held-out rooms.
 
 | Result | Number |
 |---|---|
-| Obstacle avoidance, 3 pillars, flight length out of 40 steps / collision rate | PPO 38.4 / 4%, oracle planner 37.9 / 6%, DQN about 3 / 100% |
+| Obstacle avoidance, 3 pillars, steps survived out of 40 / collision rate | PPO 38.4 / 4% (oracle planner 37.9 / 6%), reached by stopping in open space; DQN about 3 / 100% |
 | Doorway finding, success rate (3 seeds) | full input 0.66 ± 0.03, range only (no bearing) 0.48 ± 0.05 |
 | Coverage in clutter, cells reached | full input 5.9 ± 1.2, without the bearing cue 1.7 ± 0.3 |
 | Cluttered doorway task, success | learned-world-model MPC 0.24, occupancy map + planner 0.46, reactive bearing 0.52, perfect-map ceiling 0.95 |
 
-- Continuous actions (slow down, stop, pivot) are what let PPO survive clutter. The fixed-speed discrete DQN
-  could not brake.
+- A survive-only avoidance reward is won by stopping. PPO parks in open space (mean forward step 0.004 m in
+  clutter), which survives as well as the oracle without testing navigation. The fixed-speed discrete DQN
+  cannot brake and crashes. The coverage task (reward for new ground, cost per step) removes the exploit,
+  and it is the task on which the cues separate.
 - The binaural bearing cue carries doorway finding and cluttered coverage. Using bearing reactively, rather than
   fusing it into a map coordinate, gave a further gain without changing any estimator.
 - Several perception gains bought no control. Head scanning halved the doorway bearing error (83.9° to 44.6°),
